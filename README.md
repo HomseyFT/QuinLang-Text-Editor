@@ -11,12 +11,23 @@ A lightweight, self-contained IDE for the QuinLang programming language. This ap
 - **Output Panel** — View program output and error messages with colored diagnostics
 - **File Management** — New, Open, Save, Save As with unsaved changes detection
 
-## Requirements
+## Download
+
+Pre-built executables are available on the [Releases](../../releases) page:
+
+- **Windows**: `QuinLangIDE.exe` — Double-click to run
+- **Linux**: `QuinLangIDE` — Run `chmod +x QuinLangIDE && ./QuinLangIDE`
+
+No installation or Python required for the standalone executables.
+
+## Running from Source
+
+### Requirements
 
 - Python 3.10+
 - Tkinter (included with standard Python on Windows/macOS)
 
-## Quick Start
+### Quick Start
 
 ```bash
 python run_ide.py

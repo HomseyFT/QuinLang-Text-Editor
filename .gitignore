@@ -43,10 +43,11 @@ Desktop.ini
 
 # Build outputs
 *.com
-*.exe
 *.o
 *.asm
-build/out.*
+build/
+dist/
+*.spec.bak
 
 # Test artifacts
 .pytest_cache/
