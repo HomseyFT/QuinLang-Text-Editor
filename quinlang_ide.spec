@@ -40,8 +40,10 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 import os
 
-
-icon_file = 'icon.ico' if os.path.exists('icon.ico') else None
+# Use absolute path relative to spec file location
+spec_dir = os.path.dirname(os.path.abspath(SPEC))
+icon_path = os.path.join(spec_dir, 'icon.ico')
+icon_file = icon_path if os.path.exists(icon_path) else None
 
 exe = EXE(
     pyz,
