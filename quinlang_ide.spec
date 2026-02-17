@@ -40,7 +40,7 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 import os
 
-# Icon file (optional - remove if not present)
+
 icon_file = 'icon.ico' if os.path.exists('icon.ico') else None
 
 exe = EXE(
