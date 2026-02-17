@@ -38,6 +38,11 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+import os
+
+# Icon file (optional - remove if not present)
+icon_file = 'icon.ico' if os.path.exists('icon.ico') else None
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -58,4 +63,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=icon_file,
 )

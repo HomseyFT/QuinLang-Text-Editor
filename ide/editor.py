@@ -5,6 +5,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
+from .theme import COLORS, FONTS
+
 
 class LineNumbers(tk.Canvas):
     """Canvas widget displaying line numbers."""
@@ -12,7 +14,7 @@ class LineNumbers(tk.Canvas):
     def __init__(self, parent: tk.Widget, text_widget: tk.Text, **kwargs):
         super().__init__(parent, width=50, **kwargs)
         self.text_widget = text_widget
-        self.config(bg="#2b2b2b", highlightthickness=0)
+        self.config(bg=COLORS['bg_medium'], highlightthickness=0)
 
     def redraw(self):
         """Redraw line numbers to match the text widget."""
@@ -35,8 +37,8 @@ class LineNumbers(tk.Canvas):
                     45, y,
                     anchor="ne",
                     text=str(line_num),
-                    fill="#6b6b6b",
-                    font=("Consolas", 11)
+                    fill=COLORS['text_muted'],
+                    font=FONTS['code']
                 )
 
 
@@ -54,19 +56,19 @@ class CodeEditor(ttk.Frame):
         self.text = tk.Text(
             self,
             wrap=tk.NONE,
-            font=("Consolas", 11),
-            bg="#1e1e1e",
-            fg="#d4d4d4",
-            insertbackground="#ffffff",
-            selectbackground="#264f78",
-            selectforeground="#ffffff",
+            font=FONTS['code'],
+            bg=COLORS['bg_dark'],
+            fg=COLORS['text_primary'],
+            insertbackground=COLORS['text_primary'],
+            selectbackground=COLORS['accent'],
+            selectforeground=COLORS['bg_dark'],
             undo=True,
             padx=5,
             pady=5,
         )
 
         # Create line numbers
-        self.line_numbers = LineNumbers(self, self.text, bg="#2b2b2b")
+        self.line_numbers = LineNumbers(self, self.text, bg=COLORS['bg_medium'])
         self.line_numbers.grid(row=0, column=0, sticky="ns")
 
         # Grid the text widget
