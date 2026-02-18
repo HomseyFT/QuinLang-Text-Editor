@@ -1,0 +1,98 @@
+name: Sync Compiler from QuinLang
+
+on:
+  repository_dispatch:
+    types: [compiler-updated]
+  workflow_dispatch:
+    inputs:
+      auto_release:
+        description: 'Create a release after sync'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout QuinLang-IDE
+        uses: actions/checkout@v4
+        with:
+          path: ide
+
+      - name: Checkout QuinLang
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/QuinLang
+          path: lang
+
+      - name: Sync compiler and runtime
+        run: |
+          # Remove old directories
+          rm -rf ide/compiler ide/runtime ide/examples
+          
+          # Copy fresh from QuinLang
+          cp -r lang/compiler ide/compiler
+          cp -r lang/runtime ide/runtime
+          cp -r lang/examples ide/examples
+          
+          # Remove any __pycache__ directories
+          find ide/compiler ide/runtime -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Check for changes
+        id: changes
+        run: |
+          cd ide
+          if [[ -n $(git status --porcelain) ]]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit and push changes
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          cd ide
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add compiler/ runtime/ examples/
+          git commit -m "Sync compiler/runtime from QuinLang
+
+          Source commit: ${{ github.event.client_payload.sha || 'manual sync' }}
+          
+          Co-Authored-By: Warp <agent@warp.dev>"
+          git push
+
+      - name: Get current version
+        if: steps.changes.outputs.has_changes == 'true'
+        id: version
+        run: |
+          cd ide
+          # Extract version from updater.py
+          VERSION=$(grep -oP 'CURRENT_VERSION\s*=\s*"\K[^"]+' ide/updater.py || echo "0.1.0")
+          
+          # Parse and increment patch version
+          IFS='.' read -r major minor patch <<< "$VERSION"
+          NEW_PATCH=$((patch + 1))
+          NEW_VERSION="${major}.${minor}.${NEW_PATCH}"
+          
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update version in updater.py
+        if: steps.changes.outputs.has_changes == 'true' && (github.event.inputs.auto_release == 'true' || github.event_name == 'repository_dispatch')
+        run: |
+          cd ide
+          sed -i "s/CURRENT_VERSION = \"[^\"]*\"/CURRENT_VERSION = \"${{ steps.version.outputs.version }}\"/" ide/updater.py
+          git add ide/updater.py
+          git commit -m "Bump version to ${{ steps.version.outputs.version }}"
+          git push
+
+      - name: Create release tag
+        if: steps.changes.outputs.has_changes == 'true' && (github.event.inputs.auto_release == 'true' || github.event_name == 'repository_dispatch')
+        run: |
+          cd ide
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
