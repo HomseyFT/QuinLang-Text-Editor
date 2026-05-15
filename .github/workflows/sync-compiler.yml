@@ -61,7 +61,7 @@ jobs:
           git add compiler/ runtime/ examples/
           git commit -m "Sync compiler/runtime from QuinLang
 
-          Source commit: ${{ github.event.client_payload.sha || 'manual sync' }}
+          Source commit: ${{ github.event.client_payload.sha || 'manual sync' }}"
           
           git push
 
