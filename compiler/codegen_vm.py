@@ -4,7 +4,7 @@ from typing import Dict, List, Tuple
 from . import ast as A
 from .bytecode import OpCode, Instruction, Bytecode
 from .sema import Context
-from .types import Int, Str, Bool
+from .compiler_types import Int, Str, Bool
 
 
 @dataclass
@@ -136,12 +136,18 @@ class CodeGenVM:
             t = ctx.get_type(st.value)
             if t == Str:
                 self.code.append(Instruction(OpCode.PRINT_STR))
+            elif t == Bool:
+                self._emit_bool_to_str(layout, ctx)
+                self.code.append(Instruction(OpCode.PRINT_STR))
             else:
                 self.code.append(Instruction(OpCode.PRINT_INT))
         elif isinstance(st, A.PrintLn):
             self._emit_expr(st.value, layout, ctx)
             t = ctx.get_type(st.value)
             if t == Str:
+                self.code.append(Instruction(OpCode.PRINTLN_STR))
+            elif t == Bool:
+                self._emit_bool_to_str(layout, ctx)
                 self.code.append(Instruction(OpCode.PRINTLN_STR))
             else:
                 self.code.append(Instruction(OpCode.PRINTLN_INT))
@@ -153,8 +159,7 @@ class CodeGenVM:
             self.code.append(Instruction(OpCode.RET))
         elif isinstance(st, A.ExprStmt):
             self._emit_expr(st.expr, layout, ctx)
-            # discard result
-            # (VM just leaves it on stack; could add a POP if desired)
+            self.code.append(Instruction(OpCode.POP))
         elif isinstance(st, A.If):
             self._emit_if(st, layout, ctx)
         elif isinstance(st, A.While):
@@ -268,6 +273,28 @@ class CodeGenVM:
             else:
                 raise RuntimeError(f"Unknown or malformed vm_asm instruction: '{raw}'")
 
+    def _emit_bool_to_str(self, layout: FunctionLayout, ctx: Context) -> None:
+        """Convert bool value (0/1) on top of stack to string ID for 'false'/'true'.
+
+        Leaves string ID on stack.
+        """
+        # JZ to false label
+        jz_idx = len(self.code)
+        self.code.append(Instruction(OpCode.JZ, 0))  # placeholder
+        # true branch: push string ID for "true"
+        true_sid = self._add_string("true")
+        self.code.append(Instruction(OpCode.PUSH_INT, true_sid))
+        jmp_idx = len(self.code)
+        self.code.append(Instruction(OpCode.JMP, 0))  # placeholder
+        # false branch
+        false_pc = len(self.code)
+        false_sid = self._add_string("false")
+        self.code.append(Instruction(OpCode.PUSH_INT, false_sid))
+        end_pc = len(self.code)
+        # patch jumps
+        self.code[jz_idx].arg = false_pc
+        self.code[jmp_idx].arg = end_pc
+
     def _emit_expr(self, e: A.Expr, layout: FunctionLayout, ctx: Context):
         if isinstance(e, A.Literal):
             if isinstance(e.value, bool):
@@ -367,6 +394,8 @@ class CodeGenVM:
                 self.code.append(Instruction(OpCode.MUL))
             elif e.op == '/':
                 self.code.append(Instruction(OpCode.DIV))
+            elif e.op == '%':
+                self.code.append(Instruction(OpCode.MOD))
             elif e.op == '==':
                 self.code.append(Instruction(OpCode.CMP_EQ))
             elif e.op == '!=':

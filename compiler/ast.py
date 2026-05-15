@@ -2,9 +2,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Union
 
+# Base node with location info
+@dataclass
+class Node:
+    line: int = 0
+    col: int = 0
+
 # Expressions
 @dataclass
-class Expr:
+class Expr(Node):
     pass
 
 @dataclass
@@ -42,7 +48,7 @@ class AddressOf(Expr):
 
 # Statements
 @dataclass
-class Stmt:
+class Stmt(Node):
     pass
 
 @dataclass
@@ -111,5 +117,10 @@ class Function:
     body: List[Stmt]
 
 @dataclass
+class Include:
+    path: str  # The string literal path from the include statement
+
+@dataclass
 class Program:
+    includes: List[Include]
     functions: List[Function]

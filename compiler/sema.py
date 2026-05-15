@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 from . import ast as A
-from .types import Type, Int, Str, Void, Bool, Ptr, type_from_name, is_array_type
+from .compiler_types import Type, Int, Str, Void, Bool, Ptr, type_from_name, is_array_type
 from .builtins import get_builtins, BuiltinSig
 
 class SemanticError(Exception):
@@ -80,17 +80,16 @@ class SemanticAnalyzer:
         scope = Scope()
         for p, t in zip(fn.params, sig.params):
             scope.define(Symbol(p.name, t))
-        saw_return = False
+        # Check if function body always returns
+        always_returns = any(self._always_returns(st, scope, sig.ret) for st in fn.body)
         for st in fn.body:
-            self._analyze_stmt(st, scope)
-            if isinstance(st, A.Return):
-                saw_return = True
-        # For non-void functions, require at least one return
-        if sig.ret != Void and not saw_return:
+            self._analyze_stmt(st, scope, sig.ret)   # FIXED: removed space and dot
+        if sig.ret != Void and not always_returns:
             raise SemanticError(f"Function '{fn.name}' missing return statement")
 
-    def _analyze_stmt(self, st: A.Stmt, scope: Scope):
+    def _analyze_stmt(self, st: A.Stmt, scope: Scope, ret_type: Type = Void):
         if isinstance(st, A.VarDecl):
+            # FIXED: clean call to type_from_name
             var_type = type_from_name(st.type_name) if st.type_name else None
             if st.init is not None:
                 init_t = self._analyze_expr(st.init, scope)
@@ -127,32 +126,65 @@ class SemanticAnalyzer:
             if val_t not in (Int, Str):
                 raise SemanticError("print/println expect int or str")
         elif isinstance(st, A.Return):
-            # We can't access function return type easily here without passing it; for simplicity, allow any
+            if ret_type == Void and st.value is not None:
+                raise SemanticError("Void function cannot return a value")
+            if ret_type != Void and st.value is None:
+                raise SemanticError(f"Expected return value of type {ret_type}")
             if st.value is not None:
-                self._analyze_expr(st.value, scope)
+                val_t = self._analyze_expr(st.value, scope)
+                if val_t != ret_type:
+                    raise SemanticError(f"Return type mismatch: expected {ret_type}, got {val_t}")  # FIXED: single line
         elif isinstance(st, A.If):
-            self._analyze_expr(st.cond, scope)
+            cond_t = self._analyze_expr(st.cond, scope)
+            if cond_t != Bool:
+                raise SemanticError("If condition must be bool")
             then_scope = Scope(scope)
             for s in st.then_block:
-                self._analyze_stmt(s, then_scope)
+                self._analyze_stmt(s, then_scope, ret_type)
             if st.else_block:
                 else_scope = Scope(scope)
                 for s in st.else_block:
-                    self._analyze_stmt(s, else_scope)
+                    self._analyze_stmt(s, else_scope, ret_type)
         elif isinstance(st, A.While):
-            self._analyze_expr(st.cond, scope)
+            cond_t = self._analyze_expr(st.cond, scope)
+            if cond_t != Bool:
+                raise SemanticError("While condition must be bool")
             body_scope = Scope(scope)
             for s in st.body:
-                self._analyze_stmt(s, body_scope)
+                self._analyze_stmt(s, body_scope, ret_type)
         elif isinstance(st, A.ExprStmt):
             self._analyze_expr(st.expr, scope)
         else:
             # Ignore blocks etc.
             pass
 
+    def _always_returns(self, st: A.Stmt, scope: Scope, ret_type: Type) -> bool:
+        """Return True if statement always returns (i.e., execution cannot continue past it)."""
+        if isinstance(st, A.Return):
+            return True
+        if isinstance(st, A.Block):
+            # A block always returns if any statement in it always returns
+            for s in st.body:
+                if self._always_returns(s, scope, ret_type):
+                    return True
+            return False
+        if isinstance(st, A.If):
+            # If with both branches: returns only if both branches always return
+            then_always = any(self._always_returns(s, scope, ret_type) for s in st.then_block)
+            if st.else_block:
+                else_always = any(self._always_returns(s, scope, ret_type) for s in st.else_block)
+                return then_always and else_always
+            else:
+                # No else branch: not guaranteed
+                return False
+        if isinstance(st, A.While):
+            # While loop may not execute, so never guaranteed
+            return False
+        # All other statements (VarDecl, Assign, ExprStmt, Print, PrintLn, etc.) do not guarantee return
+        return False
+
     def _analyze_expr(self, e: A.Expr, scope: Scope) -> Type:
         if isinstance(e, A.Literal):
-            # Order matters: in Python, bool is a subclass of int, so check bool first.
             if isinstance(e.value, bool):
                 self.ctx.set_type(e, Bool)
                 return Bool
@@ -187,6 +219,11 @@ class SemanticAnalyzer:
                     self.ctx.set_type(e, Int)
                     return Int
                 raise SemanticError("Arithmetic operators require int operands")
+            if e.op == '%':
+                if lt == Int and rt == Int:
+                    self.ctx.set_type(e, Int)
+                    return Int
+                raise SemanticError("Modulo operator requires int operands")
             if e.op in ('==', '!=', '<', '<=', '>', '>='):
                 if lt == rt:
                     self.ctx.set_type(e, Bool)
@@ -208,16 +245,13 @@ class SemanticAnalyzer:
             self.ctx.set_type(e, Int)
             return Int
         if isinstance(e, A.AddressOf):
-            # For now, allow taking the address of local variables and array elements only.
             if isinstance(e.target, A.Identifier):
                 sym = scope.resolve(e.target.name)
                 if sym is None:
                     raise SemanticError(f"Undeclared variable '{e.target.name}'")
-                # Any object with a stack slot can have its address taken; treat as ptr.
                 self.ctx.set_type(e, Ptr)
                 return Ptr
             if isinstance(e.target, A.Index):
-                # Address of array element; also ptr.
                 arr_t = self._analyze_expr(e.target.array, scope)
                 if not is_array_type(arr_t):
                     raise SemanticError("Can only take address of int[N] array elements")
@@ -228,7 +262,7 @@ class SemanticAnalyzer:
                 return Ptr
             raise SemanticError("Can only take address of variables or array elements")
         if isinstance(e, A.Call):
-            # Special handling for array helpers whose first argument is an array.
+            # Special handling for array helpers
             if e.callee == "array_push":
                 if len(e.args) != 3:
                     raise SemanticError("array_push expects 3 arguments")
@@ -252,7 +286,6 @@ class SemanticAnalyzer:
                 len_t = self._analyze_expr(e.args[1], scope)
                 if len_t != Int:
                     raise SemanticError("array_pop length must be int")
-                # returns popped int
                 self.ctx.set_type(e, Int)
                 return Int
             if e.callee not in self.ctx.functions:

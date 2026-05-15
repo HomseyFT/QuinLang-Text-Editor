@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import List, Dict, Tuple, Callable, Optional
+from typing import List, Dict, Tuple
 from compiler.bytecode import OpCode, Instruction, Bytecode
 
 
@@ -12,42 +12,18 @@ class FunctionInfo:
     num_params: int
 
 
-class ExecutionStopped(Exception):
-    """Raised when execution is stopped externally."""
-    pass
-
-
 class QuinVM:
-    def __init__(
-        self,
-        code: Bytecode,
-        functions: List[FunctionInfo],
-        strings: Dict[int, str],
-        output_callback: Optional[Callable[[str], None]] = None,
-    ):
+    def __init__(self, code: Bytecode, functions: List[FunctionInfo], strings: Dict[int, str]):
         self.code = code
         self.functions = functions
         # map name -> index for convenience
         self.func_index: Dict[str, int] = {f.name: i for i, f in enumerate(functions)}
         self.strings = strings
-        self._output_callback = output_callback
-        self._stop_requested = False
 
         self.stack: List[int] = []              # value stack
         self.call_stack: List[Tuple[int, List[int]]] = []  # (return_pc, locals)
         self.pc: int = 0
         self.locals: List[int] = []             # current frame locals
-
-    def request_stop(self):
-        """Request the VM to stop execution."""
-        self._stop_requested = True
-
-    def _output(self, text: str):
-        """Output text via callback or print."""
-        if self._output_callback:
-            self._output_callback(text)
-        else:
-            print(text, end="")
 
     def run_main(self) -> int:
         if "main" not in self.func_index:
@@ -62,10 +38,6 @@ class QuinVM:
     def _run(self) -> int:
         code = self.code
         while self.pc < len(code):
-            # Check for stop request
-            if self._stop_requested:
-                raise ExecutionStopped("Execution stopped by user")
-
             instr = code[self.pc]
             op = instr.op
             arg = instr.arg
@@ -99,6 +71,12 @@ class QuinVM:
                     raise RuntimeError("Division by zero")
                 # signed division
                 self.stack.append(int(a) // int(b))
+
+            elif op is OpCode.MOD:
+                b = self.stack.pop(); a = self.stack.pop()
+                if b == 0:
+                    raise RuntimeError("Modulo by zero")
+                self.stack.append(int(a) % int(b))
 
             elif op is OpCode.NEG:
                 a = self.stack.pop()
@@ -219,23 +197,28 @@ class QuinVM:
                         raise RuntimeError(f"MEMSET_LOCALS out of range: dst={dst}, count={count}, num_locals={len(self.locals)}")
                     self.locals[di] = value
 
+            elif op is OpCode.POP:
+                if not self.stack:
+                    raise RuntimeError(f"Stack is underflowing on POP at pc={self.pc -1}")
+                self.stack.pop()
+
             elif op is OpCode.PRINT_INT:
                 v = self.stack.pop()
-                self._output(str(int(v)))
+                print(int(v), end="")
 
             elif op is OpCode.PRINT_STR:
                 sid = self.stack.pop()
                 s = self.strings.get(sid, "")
-                self._output(s)
+                print(s, end="")
 
             elif op is OpCode.PRINTLN_INT:
                 v = self.stack.pop()
-                self._output(str(int(v)) + "\n")
+                print(int(v))
 
             elif op is OpCode.PRINTLN_STR:
                 sid = self.stack.pop()
                 s = self.strings.get(sid, "")
-                self._output(s + "\n")
+                print(s)
 
             else:
                 raise RuntimeError(f"Unknown opcode {op}")

@@ -3,7 +3,7 @@ from . import ast as A
 from .emitter import Emitter
 from .sema import Context
 from .layout import LayoutBuilder
-from .types import Int, Str, Bool
+from .compiler_types import Int, Str, Bool
 
 class CodeGen8086:
     def __init__(self):

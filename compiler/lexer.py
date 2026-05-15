@@ -1,6 +1,12 @@
 from typing import List
 from .tokens import Token, TokenType, KEYWORDS
 
+class LexError(Exception):
+    def __init__(self, message: str, line: int, col: int):
+        super().__init__(message)
+        self.line = line
+        self.col = col
+
 class Lexer:
     def __init__(self, source: str):
         self.source = source
@@ -83,6 +89,8 @@ class Lexer:
             self._add_token(TokenType.SEMICOLON); return
         if c == '*':
             self._add_token(TokenType.STAR); return
+        if c == '%':
+            self._add_token(TokenType.PERCENT); return
         if c == '|':
             if self._match('|'):
                 self._add_token(TokenType.OR_OR); return
@@ -113,9 +121,11 @@ class Lexer:
         if c.isdigit():
             self._number(); return
         if c.isalpha() or c == '_':
-            self._identifier(); return
-
-        # Unknown character, skip for now; in a real compiler we'd report an error
+            self._identifier(); return # type: ignore        
+        raise LexError(
+            f"Unexpected character '{c}'",
+            self.line,
+            self.col - 1,)
 
     def _string(self):
         value_chars = []

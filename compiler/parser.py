@@ -14,10 +14,18 @@ class Parser:
         self.current = 0
 
     def parse(self) -> A.Program:
+        includes: List[A.Include] = []
+        while self._match(TokenType.INCLUDE):
+            includes.append(self._include())
         funcs: List[A.Function] = []
         while not self._is_at_end():
             funcs.append(self._function())
-        return A.Program(funcs)
+        return A.Program(includes, funcs)
+
+    def _include(self) -> A.Include:
+        path_tok = self._consume(TokenType.STRING, "Expected path string after 'include'")
+        self._consume(TokenType.SEMICOLON, "Expected ';' after include path")
+        return A.Include(path_tok.literal)
 
     # Helpers
     def _match(self, *types: TokenType) -> bool:
@@ -190,10 +198,6 @@ class Parser:
             expr = A.Binary(expr, op, right)
         return expr
 
-    def _assignment(self) -> A.Expr:
-        # assignment handled at statement level for simplicity
-        return self._equality()
-
     def _equality(self) -> A.Expr:
         expr = self._comparison()
         while self._match(TokenType.EQUAL_EQUAL, TokenType.BANG_EQUAL):
@@ -220,7 +224,7 @@ class Parser:
 
     def _factor(self) -> A.Expr:
         expr = self._unary()
-        while self._match(TokenType.STAR, TokenType.SLASH):
+        while self._match(TokenType.STAR, TokenType.SLASH, TokenType.PERCENT):  # Add modulo operator
             op = self._previous().lexeme
             right = self._unary()
             expr = A.Binary(expr, op, right)
@@ -253,6 +257,7 @@ class Parser:
                 expr = A.Call(expr.name, args)
                 continue
             # Indexing: expr '[' expression ']'
+            # ALSO: Indexing: any expression can be the base (e.g. chained arr[i][j])
             if self._match(TokenType.LEFT_BRACKET):
                 index_expr = self._expression()
                 self._consume(TokenType.RIGHT_BRACKET, "Expected ']' after index expression")
@@ -283,15 +288,20 @@ class Parser:
 
     def _primary(self) -> A.Expr:
         if self._match(TokenType.FALSE):
-            return A.Literal(False)
+            tok = self._previous()
+            return A.Literal(False, line=tok.line, col=tok.col)
         if self._match(TokenType.TRUE):
-            return A.Literal(True)
+            tok = self._previous()
+            return A.Literal(True, line=tok.line, col=tok.col)
         if self._match(TokenType.NUMBER):
-            return A.Literal(self._previous().literal)
+            tok = self._previous()
+            return A.Literal(tok.literal, line=tok.line, col=tok.col)
         if self._match(TokenType.STRING):
-            return A.Literal(self._previous().literal)
+            tok = self._previous()
+            return A.Literal(tok.literal, line=tok.line, col=tok.col)
         if self._match(TokenType.IDENTIFIER):
-            return A.Identifier(self._previous().lexeme)
+            tok = self._previous()
+            return A.Identifier(tok.lexeme, line=tok.line, col=tok.col)
         if self._match(TokenType.LEFT_PAREN):
             expr = self._expression()
             self._consume(TokenType.RIGHT_PAREN, "Expected ')' after expression")

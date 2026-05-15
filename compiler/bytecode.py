@@ -15,6 +15,7 @@ class OpCode(Enum):
     SUB = auto()
     MUL = auto()
     DIV = auto()
+    MOD = auto()
     NEG = auto()
 
     # Comparisons (push 0/1)
@@ -46,6 +47,9 @@ class OpCode(Enum):
     STORE_INDIRECT = auto()    # pop v, pop p; locals[p] = v
     MEMCPY_LOCALS = auto()     # pop count, src, dst; copy locals
     MEMSET_LOCALS = auto()     # pop count, value, dst; fill locals
+
+    # Stack management
+    POP = auto()
 
     # Builtin-style I/O
     PRINT_INT = auto()

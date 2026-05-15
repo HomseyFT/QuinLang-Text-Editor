@@ -1,7 +1,6 @@
 import argparse
 from pathlib import Path
-from .lexer import Lexer
-from .parser import Parser, ParseError
+from .resolver import ImportResolver, ResolveError
 from .sema import SemanticAnalyzer, SemanticError
 from .codegen_8086 import CodeGen8086
 import sys
@@ -13,19 +12,22 @@ def main():
     ap.add_argument("-o", "--out", type=Path, default=Path("build/out.asm"), help="Output .asm file")
     args = ap.parse_args()
 
-    src_text = args.source.read_text(encoding="utf-8")
+    # Determine std library path (relative to compiler package)
+    std_path = Path(__file__).parent.parent / "std"
 
     try:
-        tokens = Lexer(src_text).tokenize()
-        ast = Parser(tokens).parse()
+        # Resolve all includes and merge into a single program
+        resolver = ImportResolver(std_path)
+        resolved = resolver.resolve(args.source)
+        ast = resolved.program
+
         ctx = SemanticAnalyzer().analyze(ast)
         asm = CodeGen8086().generate(ast, ctx)
-    except ParseError as e:
-        print(f"Syntax error at {args.source}:{e.line}:{e.col}: {e}", file=sys.stderr)
+    except ResolveError as e:
+        print(f"Import error: {e}", file=sys.stderr)
         sys.exit(1)
     except SemanticError as e:
-        # No location-tracking yet; message should be descriptive.
-        print(f"Semantic error in {args.source}: {e}", file=sys.stderr)
+        print(f"Semantic error: {e}", file=sys.stderr)
         sys.exit(1)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
