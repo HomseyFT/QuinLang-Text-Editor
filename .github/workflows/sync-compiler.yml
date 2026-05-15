@@ -63,7 +63,6 @@ jobs:
 
           Source commit: ${{ github.event.client_payload.sha || 'manual sync' }}
           
-          Co-Authored-By: Warp <agent@warp.dev>"
           git push
 
       - name: Get current version
