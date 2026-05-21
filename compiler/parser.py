@@ -239,12 +239,14 @@ class Parser:
     def _unary(self) -> A.Expr:
         # Address-of: &expr (limited to identifiers and indexing at sema/codegen)
         if self._match(TokenType.AMP):
+            tok = self._previous()
             target = self._unary()
-            return A.AddressOf(target)
+            return A.AddressOf(target, line=tok.line, col=tok.col)
         if self._match(TokenType.BANG, TokenType.MINUS):
-            op = self._previous().lexeme
+            tok = self._previous()
+            op = tok.lexeme
             right = self._unary()
-            return A.Unary(op, right)
+            return A.Unary(op, right, line=tok.line, col=tok.col)
         return self._call()
 
     def _call(self) -> A.Expr:
