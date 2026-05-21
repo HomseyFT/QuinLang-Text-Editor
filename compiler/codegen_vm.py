@@ -4,7 +4,7 @@ from typing import Dict, List, Tuple
 from . import ast as A
 from .bytecode import OpCode, Instruction, Bytecode
 from .sema import Context
-from .compiler_types import Int, Str, Bool
+from .compiler_types import Int, Str, Bool, Void
 
 
 @dataclass
@@ -159,7 +159,9 @@ class CodeGenVM:
             self.code.append(Instruction(OpCode.RET))
         elif isinstance(st, A.ExprStmt):
             self._emit_expr(st.expr, layout, ctx)
-            self.code.append(Instruction(OpCode.POP))
+            expr_type = ctx.node_type.get(id(st.expr)) 
+            if expr_type is not None and expr_type != Void:
+                self.code.append(Instruction(OpCode.POP))
         elif isinstance(st, A.If):
             self._emit_if(st, layout, ctx)
         elif isinstance(st, A.While):

@@ -47,6 +47,9 @@ class QuinVM:
         self.heap_ptr = addr + size
         return addr
 
+    def _signed(self, v: int) -> int:
+            return v if v < 0x8000 else v - 0x10000
+
     def _run(self) -> int:
         code = self.code
         while self.pc < len(code):
@@ -78,17 +81,21 @@ class QuinVM:
                 self.stack.append((a * b) & 0xFFFF)
 
             elif op is OpCode.DIV:
-                b = self.stack.pop(); a = self.stack.pop()
+                b = self._signed(self.stack.pop())
+                a = self._signed(self.stack.pop())
                 if b == 0:
                     raise RuntimeError("Division by zero")
-                # signed division
-                self.stack.append(int(a) // int(b))
+                result = int(a / b)  # truncate toward zero, C-style
+                self.stack.append(result & 0xFFFF)
 
             elif op is OpCode.MOD:
-                b = self.stack.pop(); a = self.stack.pop()
+                b = self._signed(self.stack.pop())
+                a = self._signed(self.stack.pop())
                 if b == 0:
                     raise RuntimeError("Modulo by zero")
-                self.stack.append(int(a) % int(b))
+                q = int(a / b)
+                result = a - q * b
+                self.stack.append(result & 0xFFFF)
 
             elif op is OpCode.NEG:
                 a = self.stack.pop()
@@ -239,7 +246,7 @@ class QuinVM:
 
             elif op is OpCode.HEAP_LOAD:
                 addr = self.stack.pop()
-                if addr < 0 or addr + 1 >= len(self.heap):
+                if addr < 0 or addr + 1 > len(self.heap):
                     raise RuntimeError(f"HEAP_LOAD out of range: addr={addr}")
                 # read little‑endian word
                 lo = self.heap[addr]

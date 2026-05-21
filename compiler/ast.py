@@ -5,8 +5,8 @@ from typing import List, Optional, Union
 # Base node with location info
 @dataclass
 class Node:
-    line: int = 0
-    col: int = 0
+    line: int = field(default=0, kw_only=True)
+    col: int = field(default=0, kw_only=True)
 
 # Expressions
 @dataclass
@@ -105,22 +105,22 @@ class Block(Stmt):
     stmts: List[Stmt] = field(default_factory=list)
 
 @dataclass
-class Param:
+class Param(Node):
     name: str
     type_name: str
 
 @dataclass
-class Function:
+class Function(Node):
     name: str
     params: List[Param]
     return_type: Optional[str]
     body: List[Stmt]
 
 @dataclass
-class Include:
+class Include(Node):
     path: str  # The string literal path from the include statement
 
 @dataclass
-class Program:
+class Program(Node):
     includes: List[Include]
     functions: List[Function]

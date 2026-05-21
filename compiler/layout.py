@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 from . import ast as A
-from .types import type_from_name, Int
+from .compiler_types import type_from_name, Int
 
 @dataclass
 class StackLayout:
