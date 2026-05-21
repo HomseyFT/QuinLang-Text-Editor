@@ -25,7 +25,7 @@ class Parser:
     def _include(self) -> A.Include:
         path_tok = self._consume(TokenType.STRING, "Expected path string after 'include'")
         self._consume(TokenType.SEMICOLON, "Expected ';' after include path")
-        return A.Include(path_tok.literal)
+        return A.Include(path_tok.literal, line=path_tok.line, col=path_tok.col)
 
     # Helpers
     def _match(self, *types: TokenType) -> bool:
@@ -68,10 +68,10 @@ class Parser:
         params: List[A.Param] = []
         if not self._check(TokenType.RIGHT_PAREN):
             while True:
-                p_name = self._consume(TokenType.IDENTIFIER, "Expected parameter name").lexeme
+                p_name_tok = self._consume(TokenType.IDENTIFIER, "Expected parameter name")
                 self._consume(TokenType.COLON, "Expected ':' after parameter name")
                 p_type = self._type_name()
-                params.append(A.Param(p_name, p_type))
+                params.append(A.Param(p_name_tok.lexeme, p_type, line=p_name_tok.line, col=p_name_tok.col))
                 if not self._match(TokenType.COMMA):
                     break
         self._consume(TokenType.RIGHT_PAREN, "Expected ')' after parameters")
@@ -79,7 +79,7 @@ class Parser:
         if self._match(TokenType.COLON):
             ret_type = self._type_name()
         body = self._block()
-        return A.Function(name_tok.lexeme, params, ret_type, body)
+        return A.Function(name_tok.lexeme, params, ret_type, body, line=name_tok.line, col=name_tok.col)
 
     def _type_name(self) -> str:
         # base scalar types
@@ -119,7 +119,7 @@ class Parser:
         return self._statement()
 
     def _var_decl(self) -> A.VarDecl:
-        name = self._consume(TokenType.IDENTIFIER, "Expected variable name").lexeme
+        name_tok = self._consume(TokenType.IDENTIFIER, "Expected variable name")
         type_name: Optional[str] = None
         init: Optional[A.Expr] = None
         if self._match(TokenType.COLON):
@@ -127,7 +127,7 @@ class Parser:
         if self._match(TokenType.EQUAL):
             init = self._expression()
         self._consume(TokenType.SEMICOLON, "Expected ';' after variable declaration")
-        return A.VarDecl(name, type_name, init)
+        return A.VarDecl(name_tok.lexeme, type_name, init, line=name_tok.line, col=name_tok.col)
 
     def _statement(self) -> A.Stmt:
         if self._match(TokenType.PRINT):
