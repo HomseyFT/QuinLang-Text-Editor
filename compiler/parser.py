@@ -131,31 +131,40 @@ class Parser:
 
     def _statement(self) -> A.Stmt:
         if self._match(TokenType.PRINT):
+            tok = self._previous()
             self._consume(TokenType.LEFT_PAREN, "Expected '(' after 'print'")
             expr = self._expression()
             self._consume(TokenType.RIGHT_PAREN, "Expected ')' after print expression")
             self._consume(TokenType.SEMICOLON, "Expected ';' after print statement")
-            return A.Print(expr)
+            return A.Print(expr, line=tok.line, col=tok.col)
         if self._match(TokenType.PRINTLN):
+            tok = self._previous()
             self._consume(TokenType.LEFT_PAREN, "Expected '(' after 'println'")
             expr = self._expression()
             self._consume(TokenType.RIGHT_PAREN, "Expected ')' after println expression")
             self._consume(TokenType.SEMICOLON, "Expected ';' after println statement")
-            return A.PrintLn(expr)
+            return A.PrintLn(expr, line=tok.line, col=tok.col)
         if self._match(TokenType.ASM):
             # Simple inline 8086 asm form: asm "...";
+            kw_tok = self._previous()
             tok = self._consume(TokenType.STRING, "Expected string literal after 'asm'")
             self._consume(TokenType.SEMICOLON, "Expected ';' after asm statement")
-            return A.InlineAsm(tok.literal)
+            return A.InlineAsm(tok.literal, line=kw_tok.line, col=kw_tok.col)
         if self._match(TokenType.VM_ASM):
-            return self._vm_asm_block()
+            kw_tok = self._previous()
+            stmt = self._vm_asm_block()
+            stmt.line = kw_tok.line
+            stmt.col = kw_tok.col
+            return stmt
         if self._match(TokenType.RETURN):
+            tok = self._previous()
             value: Optional[A.Expr] = None
             if not self._check(TokenType.SEMICOLON):
                 value = self._expression()
             self._consume(TokenType.SEMICOLON, "Expected ';' after return value")
-            return A.Return(value)
+            return A.Return(value, line=tok.line, col=tok.col)
         if self._match(TokenType.IF):
+            tok = self._previous()
             self._consume(TokenType.LEFT_PAREN, "Expected '(' after 'if'")
             cond = self._expression()
             self._consume(TokenType.RIGHT_PAREN, "Expected ')' after condition")
@@ -163,21 +172,23 @@ class Parser:
             else_block = None
             if self._match(TokenType.ELSE):
                 else_block = self._block()
-            return A.If(cond, then_block, else_block)
+            return A.If(cond, then_block, else_block, line=tok.line, col=tok.col)
         if self._match(TokenType.WHILE):
+            tok = self._previous()
             self._consume(TokenType.LEFT_PAREN, "Expected '(' after 'while'")
             cond = self._expression()
             self._consume(TokenType.RIGHT_PAREN, "Expected ')' after condition")
             body = self._block()
-            return A.While(cond, body)
+            return A.While(cond, body, line=tok.line, col=tok.col)
         # General expression / assignment form: `expr` or `expr = value`.
         expr = self._expression()
         if self._match(TokenType.EQUAL):
+            eq_tok = self._previous()
             value = self._expression()
             self._consume(TokenType.SEMICOLON, "Expected ';' after assignment")
-            return A.Assign(expr, value)
+            return A.Assign(expr, value, line=eq_tok.line, col=eq_tok.col)
         self._consume(TokenType.SEMICOLON, "Expected ';' after expression")
-        return A.ExprStmt(expr)
+        return A.ExprStmt(expr, line=expr.line, col=expr.col)
 
     def _expression(self) -> A.Expr:
         return self._or()
