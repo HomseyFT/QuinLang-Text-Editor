@@ -6,7 +6,16 @@ from .compiler_types import Type, Int, Str, Void, Bool, Ptr, type_from_name, is_
 from .builtins import get_builtins, BuiltinSig
 
 class SemanticError(Exception):
-    pass
+    def __init__(self, message: str, line: int = 0, col: int = 0):
+        super().__init__(message)
+        self.message = message
+        self.line = line
+        self.col = col
+
+    def __str__(self) -> str:
+        if self.line or self.col:
+            return f"[{self.line}:{self.col}] {self.message}"
+        return self.message
 
 @dataclass
 class Symbol:
@@ -66,7 +75,7 @@ class SemanticAnalyzer:
             param_types = [type_from_name(p.type_name) for p in fn.params]
             ret_type = type_from_name(fn.return_type) if fn.return_type else Void
             if fn.name in self.ctx.functions:
-                raise SemanticError(f"Redefinition of function '{fn.name}'")
+                raise SemanticError(f"Redefinition of function '{fn.name}'", fn.line, fn.col)
             self.ctx.functions[fn.name] = FunctionSig(fn.name, param_types, ret_type)
         if 'main' not in self.ctx.functions:
             raise SemanticError("Missing entry point 'main'")
@@ -85,7 +94,7 @@ class SemanticAnalyzer:
         for st in fn.body:
             self._analyze_stmt(st, scope, sig.ret)   # FIXED: removed space and dot
         if sig.ret != Void and not always_returns:
-            raise SemanticError(f"Function '{fn.name}' missing return statement")
+            raise SemanticError(f"Function '{fn.name}' missing return statement", fn.line, fn.col)
 
     def _analyze_stmt(self, st: A.Stmt, scope: Scope, ret_type: Type = Void):
         if isinstance(st, A.VarDecl):
@@ -96,48 +105,48 @@ class SemanticAnalyzer:
                 if var_type is None:
                     var_type = init_t
                 elif var_type != init_t:
-                    raise SemanticError(f"Type mismatch in initializer for '{st.name}': {var_type} vs {init_t}")
+                    raise SemanticError(f"Type mismatch in initializer for '{st.name}': {var_type} vs {init_t}", st.line, st.col)
             if var_type is None:
-                raise SemanticError(f"Cannot infer type for '{st.name}' without initializer")
+                raise SemanticError(f"Cannot infer type for '{st.name}' without initializer", st.line, st.col)
             scope.define(Symbol(st.name, var_type))
         elif isinstance(st, A.Assign):
             # Generalized assignment target
             if isinstance(st.target, A.Identifier):
                 sym = scope.resolve(st.target.name)
                 if sym is None:
-                    raise SemanticError(f"Undeclared variable '{st.target.name}'")
+                    raise SemanticError(f"Undeclared variable '{st.target.name}'", st.target.line, st.target.col)
                 val_t = self._analyze_expr(st.value, scope)
                 if sym.type != val_t:
-                    raise SemanticError(f"Cannot assign {val_t} to {sym.type} variable '{st.target.name}'")
+                    raise SemanticError(f"Cannot assign {val_t} to {sym.type} variable '{st.target.name}'", st.target.line, st.target.col)
             elif isinstance(st.target, A.Index):
                 arr_t = self._analyze_expr(st.target.array, scope)
                 if not is_array_type(arr_t):
-                    raise SemanticError("Index target must be an int[N] array")
+                    raise SemanticError("Index target must be an int[N] array", st.target.line, st.target.col)
                 idx_t = self._analyze_expr(st.target.index, scope)
                 if idx_t != Int:
-                    raise SemanticError("Array index must be int")
+                    raise SemanticError("Array index must be int", st.target.line, st.target.col)
                 val_t = self._analyze_expr(st.value, scope)
                 if val_t != Int:
-                    raise SemanticError("Array elements must be int")
+                    raise SemanticError("Array elements must be int", st.line, st.col)
             else:
-                raise SemanticError("Invalid assignment target")
+                raise SemanticError("Invalid assignment target", st.line, st.col)
         elif isinstance(st, A.Print) or isinstance(st, A.PrintLn):
             val_t = self._analyze_expr(st.value, scope)
             if val_t not in (Int, Str):
-                raise SemanticError("print/println expect int or str")
+                raise SemanticError("print/println expect int or str", st.line, st.col)
         elif isinstance(st, A.Return):
             if ret_type == Void and st.value is not None:
-                raise SemanticError("Void function cannot return a value")
+                raise SemanticError("Void function cannot return a value", st.line, st.col)
             if ret_type != Void and st.value is None:
-                raise SemanticError(f"Expected return value of type {ret_type}")
+                raise SemanticError(f"Expected return value of type {ret_type}", st.line, st.col)
             if st.value is not None:
                 val_t = self._analyze_expr(st.value, scope)
                 if val_t != ret_type:
-                    raise SemanticError(f"Return type mismatch: expected {ret_type}, got {val_t}")  # FIXED: single line
+                    raise SemanticError(f"Return type mismatch: expected {ret_type}, got {val_t}", st.line, st.col)  # FIXED: single line
         elif isinstance(st, A.If):
             cond_t = self._analyze_expr(st.cond, scope)
             if cond_t != Bool:
-                raise SemanticError("If condition must be bool")
+                raise SemanticError("If condition must be bool", st.line, st.col)
             then_scope = Scope(scope)
             for s in st.then_block:
                 self._analyze_stmt(s, then_scope, ret_type)
@@ -148,7 +157,7 @@ class SemanticAnalyzer:
         elif isinstance(st, A.While):
             cond_t = self._analyze_expr(st.cond, scope)
             if cond_t != Bool:
-                raise SemanticError("While condition must be bool")
+                raise SemanticError("While condition must be bool", st.line, st.col)
             body_scope = Scope(scope)
             for s in st.body:
                 self._analyze_stmt(s, body_scope, ret_type)
@@ -199,7 +208,7 @@ class SemanticAnalyzer:
         if isinstance(e, A.Identifier):
             sym = scope.resolve(e.name)
             if sym is None:
-                raise SemanticError(f"Undeclared variable '{e.name}'")
+                raise SemanticError(f"Undeclared variable '{e.name}'", e.line, e.col)
             self.ctx.set_type(e, sym.type)
             return sym.type
         if isinstance(e, A.Unary):
@@ -210,7 +219,7 @@ class SemanticAnalyzer:
             if e.op == '!' and t == Bool:
                 self.ctx.set_type(e, Bool)
                 return Bool
-            raise SemanticError(f"Invalid unary op {e.op} for type {t}")
+            raise SemanticError(f"Invalid unary op {e.op} for type {t}", e.line, e.col)
         if isinstance(e, A.Binary):
             lt = self._analyze_expr(e.left, scope)
             rt = self._analyze_expr(e.right, scope)
@@ -218,85 +227,85 @@ class SemanticAnalyzer:
                 if lt == Int and rt == Int:
                     self.ctx.set_type(e, Int)
                     return Int
-                raise SemanticError("Arithmetic operators require int operands")
+                raise SemanticError("Arithmetic operators require int operands", e.line, e.col)
             if e.op == '%':
                 if lt == Int and rt == Int:
                     self.ctx.set_type(e, Int)
                     return Int
-                raise SemanticError("Modulo operator requires int operands")
+                raise SemanticError("Modulo operator requires int operands", e.line, e.col)
             if e.op in ('==', '!=', '<', '<=', '>', '>='):
                 if lt == rt:
                     self.ctx.set_type(e, Bool)
                     return Bool
-                raise SemanticError("Comparison requires operands of same type")
+                raise SemanticError("Comparison requires operands of same type", e.line, e.col)
             if e.op in ('&&', '||'):
                 if lt == Bool and rt == Bool:
                     self.ctx.set_type(e, Bool)
                     return Bool
-                raise SemanticError("Logical && and || require bool operands")
-            raise SemanticError(f"Unknown operator {e.op}")
+                raise SemanticError("Logical && and || require bool operands", e.line, e.col)
+            raise SemanticError(f"Unknown operator {e.op}", e.line, e.col)
         if isinstance(e, A.Index):
             arr_t = self._analyze_expr(e.array, scope)
             if not is_array_type(arr_t):
-                raise SemanticError("Indexing requires int[N] array")
+                raise SemanticError("Indexing requires int[N] array", e.line, e.col)
             idx_t = self._analyze_expr(e.index, scope)
             if idx_t != Int:
-                raise SemanticError("Array index must be int")
+                raise SemanticError("Array index must be int", e.line, e.col)
             self.ctx.set_type(e, Int)
             return Int
         if isinstance(e, A.AddressOf):
             if isinstance(e.target, A.Identifier):
                 sym = scope.resolve(e.target.name)
                 if sym is None:
-                    raise SemanticError(f"Undeclared variable '{e.target.name}'")
+                    raise SemanticError(f"Undeclared variable '{e.target.name}'", e.target.line, e.target.col)
                 self.ctx.set_type(e, Ptr)
                 return Ptr
             if isinstance(e.target, A.Index):
                 arr_t = self._analyze_expr(e.target.array, scope)
                 if not is_array_type(arr_t):
-                    raise SemanticError("Can only take address of int[N] array elements")
+                    raise SemanticError("Can only take address of int[N] array elements", e.target.line, e.target.col)
                 idx_t = self._analyze_expr(e.target.index, scope)
                 if idx_t != Int:
-                    raise SemanticError("Array index must be int")
+                    raise SemanticError("Array index must be int", e.target.line, e.target.col)
                 self.ctx.set_type(e, Ptr)
                 return Ptr
-            raise SemanticError("Can only take address of variables or array elements")
+            raise SemanticError("Can only take address of variables or array elements", e.line, e.col)
         if isinstance(e, A.Call):
             # Special handling for array helpers
             if e.callee == "array_push":
                 if len(e.args) != 3:
-                    raise SemanticError("array_push expects 3 arguments")
+                    raise SemanticError("array_push expects 3 arguments", e.line, e.col)
                 arr_t = self._analyze_expr(e.args[0], scope)
                 if not is_array_type(arr_t):
-                    raise SemanticError("array_push first argument must be int[N] array")
+                    raise SemanticError("array_push first argument must be int[N] array", e.line, e.col)
                 len_t = self._analyze_expr(e.args[1], scope)
                 if len_t != Int:
-                    raise SemanticError("array_push length must be int")
+                    raise SemanticError("array_push length must be int", e.line, e.col)
                 val_t = self._analyze_expr(e.args[2], scope)
                 if val_t != Int:
-                    raise SemanticError("array_push value must be int")
+                    raise SemanticError("array_push value must be int", e.line, e.col)
                 self.ctx.set_type(e, Int)
                 return Int
             if e.callee == "array_pop":
                 if len(e.args) != 2:
-                    raise SemanticError("array_pop expects 2 arguments")
+                    raise SemanticError("array_pop expects 2 arguments", e.line, e.col)
                 arr_t = self._analyze_expr(e.args[0], scope)
                 if not is_array_type(arr_t):
-                    raise SemanticError("array_pop first argument must be int[N] array")
+                    raise SemanticError("array_pop first argument must be int[N] array", e.line, e.col)
                 len_t = self._analyze_expr(e.args[1], scope)
                 if len_t != Int:
-                    raise SemanticError("array_pop length must be int")
+                    raise SemanticError("array_pop length must be int", e.line, e.col)
                 self.ctx.set_type(e, Int)
                 return Int
             if e.callee not in self.ctx.functions:
-                raise SemanticError(f"Call to undeclared function '{e.callee}'")
+                raise SemanticError(f"Call to undeclared function '{e.callee}'", e.line, e.col)
             sig = self.ctx.functions[e.callee]
             if len(e.args) != len(sig.params):
-                raise SemanticError(f"Function '{e.callee}' expects {len(sig.params)} args, got {len(e.args)}")
+                raise SemanticError(f"Function '{e.callee}' expects {len(sig.params)} args, got {len(e.args)}", e.line, e.col)
             for a, pt in zip(e.args, sig.params):
                 at = self._analyze_expr(a, scope)
                 if at != pt:
-                    raise SemanticError(f"Argument type mismatch: expected {pt}, got {at}")
+                    raise SemanticError(f"Argument type mismatch: expected {pt}, got {at}", e.line, e.col)
             self.ctx.set_type(e, sig.ret)
             return sig.ret
-        raise SemanticError("Unhandled expression type")
+        raise SemanticError("Unhandled expression type", e.line, e.col)
