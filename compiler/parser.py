@@ -185,49 +185,55 @@ class Parser:
     def _or(self) -> A.Expr:
         expr = self._and()
         while self._match(TokenType.OR_OR):
-            op = self._previous().lexeme
+            op_tok = self._previous()
+            op = op_tok.lexeme
             right = self._and()
-            expr = A.Binary(expr, op, right)
+            expr = A.Binary(expr, op, right, line=op_tok.line, col=op_tok.col)
         return expr
 
     def _and(self) -> A.Expr:
         expr = self._equality()
         while self._match(TokenType.AND_AND):
-            op = self._previous().lexeme
+            op_tok = self._previous()
+            op = op_tok.lexeme
             right = self._equality()
-            expr = A.Binary(expr, op, right)
+            expr = A.Binary(expr, op, right, line=op_tok.line, col=op_tok.col)
         return expr
 
     def _equality(self) -> A.Expr:
         expr = self._comparison()
         while self._match(TokenType.EQUAL_EQUAL, TokenType.BANG_EQUAL):
-            op = self._previous().lexeme
+            op_tok = self._previous()
+            op = op_tok.lexeme
             right = self._comparison()
-            expr = A.Binary(expr, op, right)
+            expr = A.Binary(expr, op, right, line=op_tok.line, col=op_tok.col)
         return expr
 
     def _comparison(self) -> A.Expr:
         expr = self._term()
         while self._match(TokenType.GREATER, TokenType.GREATER_EQUAL, TokenType.LESS, TokenType.LESS_EQUAL):
-            op = self._previous().lexeme
+            op_tok = self._previous()
+            op = op_tok.lexeme
             right = self._term()
-            expr = A.Binary(expr, op, right)
+            expr = A.Binary(expr, op, right, line=op_tok.line, col=op_tok.col)
         return expr
 
     def _term(self) -> A.Expr:
         expr = self._factor()
         while self._match(TokenType.PLUS, TokenType.MINUS):
-            op = self._previous().lexeme
+            op_tok = self._previous()
+            op = op_tok.lexeme
             right = self._factor()
-            expr = A.Binary(expr, op, right)
+            expr = A.Binary(expr, op, right, line=op_tok.line, col=op_tok.col)
         return expr
 
     def _factor(self) -> A.Expr:
         expr = self._unary()
         while self._match(TokenType.STAR, TokenType.SLASH, TokenType.PERCENT):  # Add modulo operator
-            op = self._previous().lexeme
+            op_tok = self._previous()
+            op = op_tok.lexeme
             right = self._unary()
-            expr = A.Binary(expr, op, right)
+            expr = A.Binary(expr, op, right, line=op_tok.line, col=op_tok.col)
         return expr
 
     def _unary(self) -> A.Expr:
