@@ -22,7 +22,7 @@ a = Analysis(
         'compiler.codegen_vm',
         'compiler.bytecode',
         'compiler.ast',
-        'compiler.types',
+        'compiler.compiler_types',
         'compiler.builtins',
         'runtime.vm',
     ],

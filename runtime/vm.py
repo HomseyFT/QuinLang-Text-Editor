@@ -1,7 +1,12 @@
 from __future__ import annotations
+import threading
 from dataclasses import dataclass
-from typing import List, Dict, Tuple
+from typing import Callable, List, Dict, Optional, Tuple
 from compiler.bytecode import OpCode, Instruction, Bytecode
+
+
+class ExecutionStopped(Exception):
+    """Raised when the VM is halted via request_stop()."""
 
 
 @dataclass
@@ -13,12 +18,19 @@ class FunctionInfo:
 
 
 class QuinVM:
-    def __init__(self, code: Bytecode, functions: List[FunctionInfo], strings: Dict[int, str]):
+    def __init__(
+        self,
+        code: Bytecode,
+        functions: List[FunctionInfo],
+        strings: Dict[int, str],
+        output_callback: Optional[Callable[[str], None]] = None,
+    ):
         self.code = code
         self.functions = functions
         # map name -> index for convenience
         self.func_index: Dict[str, int] = {f.name: i for i, f in enumerate(functions)}
         self.strings = strings
+        self._output_callback = output_callback
 
         self.stack: List[int] = []              # value stack
         self.call_stack: List[Tuple[int, List[int]]] = []  # (return_pc, locals)
@@ -26,6 +38,27 @@ class QuinVM:
         self.locals: List[int] = []             # current frame locals
         self.heap: bytearray = bytearray(64 * 1024)
         self.heap_ptr: int = 0
+
+        self._stop_event = threading.Event()
+
+    # ------------------------------------------------------------------
+    # Public control API (safe to call from any thread)
+    # ------------------------------------------------------------------
+
+    def request_stop(self) -> None:
+        """Signal the VM to halt at the next instruction boundary."""
+        self._stop_event.set()
+
+    # ------------------------------------------------------------------
+    # Output helpers
+    # ------------------------------------------------------------------
+
+    def _emit(self, text: str) -> None:
+        """Route output either to the callback or to stdout."""
+        if self._output_callback is not None:
+            self._output_callback(text)
+        else:
+            print(text, end="")
 
     def run_main(self) -> int:
         if "main" not in self.func_index:
@@ -53,6 +86,9 @@ class QuinVM:
     def _run(self) -> int:
         code = self.code
         while self.pc < len(code):
+            if self._stop_event.is_set():
+                raise ExecutionStopped()
+
             instr = code[self.pc]
             op = instr.op
             arg = instr.arg
@@ -223,21 +259,21 @@ class QuinVM:
 
             elif op is OpCode.PRINT_INT:
                 v = self.stack.pop()
-                print(int(v), end="")
+                self._emit(str(int(v)))
 
             elif op is OpCode.PRINT_STR:
                 sid = self.stack.pop()
                 s = self.strings.get(sid, "")
-                print(s, end="")
+                self._emit(s)
 
             elif op is OpCode.PRINTLN_INT:
                 v = self.stack.pop()
-                print(int(v))
+                self._emit(str(int(v)) + "\n")
 
             elif op is OpCode.PRINTLN_STR:
                 sid = self.stack.pop()
                 s = self.strings.get(sid, "")
-                print(s)
+                self._emit(s + "\n")
 
             elif op is OpCode.ALLOC:
                 size = self.stack.pop()
