@@ -255,6 +255,7 @@ class Parser:
         while True:
             # Function call: IDENT '(' args? ')'
             if isinstance(expr, A.Identifier) and self._match(TokenType.LEFT_PAREN):
+                paren_tok = self._previous()
                 args: List[A.Expr] = []
                 if not self._check(TokenType.RIGHT_PAREN):
                     while True:
@@ -262,14 +263,15 @@ class Parser:
                         if not self._match(TokenType.COMMA):
                             break
                 self._consume(TokenType.RIGHT_PAREN, "Expected ')' after arguments")
-                expr = A.Call(expr.name, args)
+                expr = A.Call(expr.name, args, line=paren_tok.line, col=paren_tok.col)
                 continue
             # Indexing: expr '[' expression ']'
             # ALSO: Indexing: any expression can be the base (e.g. chained arr[i][j])
             if self._match(TokenType.LEFT_BRACKET):
+                bracket_tok = self._previous()
                 index_expr = self._expression()
                 self._consume(TokenType.RIGHT_BRACKET, "Expected ']' after index expression")
-                expr = A.Index(expr, index_expr)
+                expr = A.Index(expr, index_expr, line=bracket_tok.line, col=bracket_tok.col)
                 continue
             break
         return expr
