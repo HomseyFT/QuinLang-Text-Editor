@@ -506,6 +506,19 @@ class CodeGenVM:
                 # Add y back.
                 self._emit_expr(y_expr, layout, ctx)
                 self.code.append(Instruction(OpCode.ADD))
+            # Heap allocation and access
+            elif name == "alloc" and len(e.args) == 1:
+                self._emit_expr(e.args[0], layout, ctx)   # push size
+                self.code.append(Instruction(OpCode.ALLOC))
+            elif name == "heap_load" and len(e.args) == 1:
+                self._emit_expr(e.args[0], layout, ctx)   # push addr
+                self.code.append(Instruction(OpCode.HEAP_LOAD))
+            elif name == "heap_store" and len(e.args) == 2:
+                self._emit_expr(e.args[0], layout, ctx)   # push addr
+                self._emit_expr(e.args[1], layout, ctx)   # push value
+                self.code.append(Instruction(OpCode.HEAP_STORE))
+                # heap_store returns void; push 0 as dummy result
+                self.code.append(Instruction(OpCode.PUSH_INT, 0))
             else:
                 # Regular user-defined function call: evaluate args then CALL by function index.
                 if name not in self.func_name_to_index:

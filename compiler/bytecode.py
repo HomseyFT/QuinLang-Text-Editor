@@ -57,6 +57,11 @@ class OpCode(Enum):
     PRINTLN_INT = auto()
     PRINTLN_STR = auto()
 
+    # Heap operations
+    ALLOC = auto()
+    HEAP_LOAD = auto()
+    HEAP_STORE = auto()
+
 
 Operand = Union[int, None]
 

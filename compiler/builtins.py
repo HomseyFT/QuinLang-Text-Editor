@@ -23,4 +23,8 @@ def get_builtins() -> Dict[str, BuiltinSig]:
         # ct_select(mask, x, y): returns x when mask != 0, else y.
         # Intended usage is mask in {0,1}.
         "ct_select":  (["int", "int", "int"], "int"),
+        # Heap allocation and access
+        "alloc":      (["int"], "ptr"),
+        "heap_load":  (["ptr"], "int"),
+        "heap_store": (["ptr", "int"], "void"),
     }

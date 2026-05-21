@@ -24,6 +24,8 @@ class QuinVM:
         self.call_stack: List[Tuple[int, List[int]]] = []  # (return_pc, locals)
         self.pc: int = 0
         self.locals: List[int] = []             # current frame locals
+        self.heap: bytearray = bytearray(64 * 1024)
+        self.heap_ptr: int = 0
 
     def run_main(self) -> int:
         if "main" not in self.func_index:
@@ -34,6 +36,16 @@ class QuinVM:
         self.locals = [0] * fn.num_locals
         self.pc = fn.entry_pc
         return self._run()
+
+    def _alloc(self, size: int) -> int:
+        # Align to 2 bytes
+        if size & 1:
+            size += 1
+        addr = self.heap_ptr
+        if addr + size > len(self.heap):
+            raise RuntimeError("Heap out of memory")
+        self.heap_ptr = addr + size
+        return addr
 
     def _run(self) -> int:
         code = self.code
@@ -219,6 +231,28 @@ class QuinVM:
                 sid = self.stack.pop()
                 s = self.strings.get(sid, "")
                 print(s)
+
+            elif op is OpCode.ALLOC:
+                size = self.stack.pop()
+                addr = self._alloc(size)
+                self.stack.append(addr)
+
+            elif op is OpCode.HEAP_LOAD:
+                addr = self.stack.pop()
+                if addr < 0 or addr + 1 >= len(self.heap):
+                    raise RuntimeError(f"HEAP_LOAD out of range: addr={addr}")
+                # read little‑endian word
+                lo = self.heap[addr]
+                hi = self.heap[addr + 1]
+                self.stack.append((hi << 8) | lo)
+
+            elif op is OpCode.HEAP_STORE:
+                value = self.stack.pop()
+                addr = self.stack.pop()
+                if addr < 0 or addr + 1 >= len(self.heap):
+                    raise RuntimeError(f"HEAP_STORE out of range: addr={addr}")
+                self.heap[addr] = value & 0xFF
+                self.heap[addr + 1] = (value >> 8) & 0xFF
 
             else:
                 raise RuntimeError(f"Unknown opcode {op}")
