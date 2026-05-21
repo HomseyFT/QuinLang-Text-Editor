@@ -20,7 +20,7 @@ import urllib.error
 # Configuration - UPDATE THESE FOR YOUR REPO
 GITHUB_OWNER = "YOUR_GITHUB_USERNAME"  # Change this!
 GITHUB_REPO = "QuinLang-IDE"
-CURRENT_VERSION = "0.1.8"  # Increment this with each release
+CURRENT_VERSION = "0.1.9"  # Increment this with each release
 
 
 @dataclass
