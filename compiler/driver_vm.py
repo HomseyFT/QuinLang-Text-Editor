@@ -1,18 +1,10 @@
 import argparse
-import sys
 from pathlib import Path
-
-# Ensure the project root (parent of compiler/) is on sys.path so that
-# `runtime` can be imported as a top-level package regardless of how this
-# module is invoked (python -m compiler.driver_vm, direct script, or frozen).
-_project_root = str(Path(__file__).resolve().parent.parent)
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
-
 from .resolver import ImportResolver, ResolveError
 from .sema import SemanticAnalyzer, SemanticError
 from .codegen_vm import CodeGenVM
 from runtime.vm import QuinVM
+import sys
 
 
 def main():

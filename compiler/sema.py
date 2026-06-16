@@ -132,7 +132,7 @@ class SemanticAnalyzer:
                 raise SemanticError("Invalid assignment target", st.line, st.col)
         elif isinstance(st, A.Print) or isinstance(st, A.PrintLn):
             val_t = self._analyze_expr(st.value, scope)
-            if val_t not in (Int, Str):
+            if val_t not in (Int, Str, Bool):
                 raise SemanticError("print/println expect int or str", st.line, st.col)
         elif isinstance(st, A.Return):
             if ret_type == Void and st.value is not None:
