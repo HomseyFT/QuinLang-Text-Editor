@@ -2,7 +2,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 from . import ast as A
-from .compiler_types import Type, Int, Str, Void, Bool, Ptr, type_from_name, is_array_type
+from .compiler_types import (
+    Type, Int, Str, Void, Bool, Ptr, type_from_name, is_array_type, UnknownTypeError,
+)
 from .builtins import get_builtins, BuiltinSig
 
 class SemanticError(Exception):
@@ -33,9 +35,9 @@ class Scope:
         self.parent = parent
         self.vars: Dict[str, Symbol] = {}
 
-    def define(self, sym: Symbol):
+    def define(self, sym: Symbol, line: int = 0, col: int = 0):
         if sym.name in self.vars:
-            raise SemanticError(f"Redeclaration of variable '{sym.name}'")
+            raise SemanticError(f"Redeclaration of variable '{sym.name}'", line, col)
         self.vars[sym.name] = sym
 
     def resolve(self, name: str) -> Optional[Symbol]:
@@ -61,6 +63,13 @@ class SemanticAnalyzer:
     def __init__(self):
         self.ctx = Context()
 
+    def _resolve_type(self, name: str, line: int, col: int) -> Type:
+        """Map a source-level type name onto a concrete Type, with location on failure."""
+        try:
+            return type_from_name(name)
+        except UnknownTypeError as e:
+            raise SemanticError(str(e), line, col)
+
     def analyze(self, program: A.Program) -> Context:
         # Register builtin functions first
         for name, (param_names, ret_name) in get_builtins().items():
@@ -72,49 +81,88 @@ class SemanticAnalyzer:
 
         # First pass: collect user-defined function signatures
         for fn in program.functions:
-            param_types = [type_from_name(p.type_name) for p in fn.params]
-            ret_type = type_from_name(fn.return_type) if fn.return_type else Void
+            param_types: List[Type] = []
+            for p in fn.params:
+                pt = self._resolve_type(p.type_name, p.line, p.col)
+                if is_array_type(pt):
+                    raise SemanticError(
+                        f"Array types are not supported for parameters (parameter '{p.name}'); "
+                        f"arrays are local to the function that declares them",
+                        p.line, p.col,
+                    )
+                param_types.append(pt)
+            ret_type = self._resolve_type(fn.return_type, fn.line, fn.col) if fn.return_type else Void
+            if is_array_type(ret_type):
+                raise SemanticError(f"Function '{fn.name}' cannot return an array type", fn.line, fn.col)
             if fn.name in self.ctx.functions:
                 raise SemanticError(f"Redefinition of function '{fn.name}'", fn.line, fn.col)
             self.ctx.functions[fn.name] = FunctionSig(fn.name, param_types, ret_type)
-        if 'main' not in self.ctx.functions:
-            raise SemanticError("Missing entry point 'main'")
+
+        self._check_entry_point(program)
+
         # Second pass: analyze function bodies
         for fn in program.functions:
             self._analyze_function(fn)
         return self.ctx
 
+    def _check_entry_point(self, program: A.Program):
+        sig = self.ctx.functions.get('main')
+        if sig is None:
+            raise SemanticError("Missing entry point 'main'")
+        node = next((f for f in program.functions if f.name == 'main'), None)
+        line = node.line if node else 0
+        col = node.col if node else 0
+        if sig.params:
+            raise SemanticError("Entry point 'main' must not take parameters", line, col)
+        if sig.ret not in (Int, Void):
+            raise SemanticError(
+                f"Entry point 'main' must return int or void, got {sig.ret}", line, col
+            )
+
     def _analyze_function(self, fn: A.Function):
         sig = self.ctx.functions[fn.name]
         scope = Scope()
         for p, t in zip(fn.params, sig.params):
-            scope.define(Symbol(p.name, t))
+            scope.define(Symbol(p.name, t), p.line, p.col)
         # Check if function body always returns
         always_returns = any(self._always_returns(st, scope, sig.ret) for st in fn.body)
         for st in fn.body:
-            self._analyze_stmt(st, scope, sig.ret)   # FIXED: removed space and dot
+            self._analyze_stmt(st, scope, sig.ret)
         if sig.ret != Void and not always_returns:
             raise SemanticError(f"Function '{fn.name}' missing return statement", fn.line, fn.col)
 
     def _analyze_stmt(self, st: A.Stmt, scope: Scope, ret_type: Type = Void):
         if isinstance(st, A.VarDecl):
-            # FIXED: clean call to type_from_name
-            var_type = type_from_name(st.type_name) if st.type_name else None
+            var_type = self._resolve_type(st.type_name, st.line, st.col) if st.type_name else None
             if st.init is not None:
                 init_t = self._analyze_expr(st.init, scope)
                 if var_type is None:
                     var_type = init_t
                 elif var_type != init_t:
                     raise SemanticError(f"Type mismatch in initializer for '{st.name}': {var_type} vs {init_t}", st.line, st.col)
+                # Arrays have no value form: there is no array literal and
+                # copying one would need a slot-wise copy the backend can't express.
+                if is_array_type(var_type):
+                    raise SemanticError(
+                        f"Array variable '{st.name}' cannot have an initializer; "
+                        f"arrays are zeroed at declaration and filled element by element",
+                        st.line, st.col,
+                    )
             if var_type is None:
                 raise SemanticError(f"Cannot infer type for '{st.name}' without initializer", st.line, st.col)
-            scope.define(Symbol(st.name, var_type))
+            scope.define(Symbol(st.name, var_type), st.line, st.col)
         elif isinstance(st, A.Assign):
             # Generalized assignment target
             if isinstance(st.target, A.Identifier):
                 sym = scope.resolve(st.target.name)
                 if sym is None:
                     raise SemanticError(f"Undeclared variable '{st.target.name}'", st.target.line, st.target.col)
+                if is_array_type(sym.type):
+                    raise SemanticError(
+                        f"Cannot assign to array variable '{st.target.name}' as a whole; "
+                        f"assign to its elements instead",
+                        st.target.line, st.target.col,
+                    )
                 val_t = self._analyze_expr(st.value, scope)
                 if sym.type != val_t:
                     raise SemanticError(f"Cannot assign {val_t} to {sym.type} variable '{st.target.name}'", st.target.line, st.target.col)
@@ -132,8 +180,12 @@ class SemanticAnalyzer:
                 raise SemanticError("Invalid assignment target", st.line, st.col)
         elif isinstance(st, A.Print) or isinstance(st, A.PrintLn):
             val_t = self._analyze_expr(st.value, scope)
+            # bool prints as "true"/"false"; the VM backend lowers it via a
+            # branch into the string table.
             if val_t not in (Int, Str, Bool):
-                raise SemanticError("print/println expect int or str", st.line, st.col)
+                raise SemanticError(
+                    f"print/println expect int, str, or bool, got {val_t}", st.line, st.col
+                )
         elif isinstance(st, A.Return):
             if ret_type == Void and st.value is not None:
                 raise SemanticError("Void function cannot return a value", st.line, st.col)
@@ -142,7 +194,7 @@ class SemanticAnalyzer:
             if st.value is not None:
                 val_t = self._analyze_expr(st.value, scope)
                 if val_t != ret_type:
-                    raise SemanticError(f"Return type mismatch: expected {ret_type}, got {val_t}", st.line, st.col)  # FIXED: single line
+                    raise SemanticError(f"Return type mismatch: expected {ret_type}, got {val_t}", st.line, st.col)
         elif isinstance(st, A.If):
             cond_t = self._analyze_expr(st.cond, scope)
             if cond_t != Bool:
@@ -173,7 +225,7 @@ class SemanticAnalyzer:
             return True
         if isinstance(st, A.Block):
             # A block always returns if any statement in it always returns
-            for s in st.body:
+            for s in st.stmts:
                 if self._always_returns(s, scope, ret_type):
                     return True
             return False

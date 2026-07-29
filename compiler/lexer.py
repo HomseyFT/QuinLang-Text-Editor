@@ -128,6 +128,7 @@ class Lexer:
             self.col - 1,)
 
     def _string(self):
+        open_line, open_col = self.line, self.col - 1
         value_chars = []
         while self._peek() != '"' and not self._is_at_end():
             ch = self._advance()
@@ -136,39 +137,52 @@ class Lexer:
                 self.col = 1
             value_chars.append(ch)
         if self._is_at_end():
-            # Unterminated string
-            self._add_token(TokenType.STRING, "")
-            return
+            raise LexError("Unterminated string literal", open_line, open_col)
         self._advance()  # closing quote
         value = ''.join(value_chars)
         self._add_token(TokenType.STRING, value)
+
+    def _check_range(self, value: int, text: str):
+        # int is a 16-bit type. Negation is a separate unary operator, so a
+        # literal itself is always non-negative and must fit in a word.
+        if value > 0xFFFF:
+            raise LexError(
+                f"Integer literal '{text}' does not fit in 16 bits (max 65535 / 0xFFFF)",
+                self.line,
+                self.col - (self.current - self.start),
+            )
 
     def _number(self):
         # Support hexadecimal literals of the form 0xNNNN or 0XNNNN
         if self.source[self.start] == '0' and self._peek() in ('x', 'X'):
             # consume 'x' or 'X'
             self._advance()
+            digit_start = self.current
             while True:
                 ch = self._peek()
                 if ch.isdigit() or ('a' <= ch.lower() <= 'f'):
                     self._advance()
                 else:
                     break
+            if self.current == digit_start:
+                raise LexError(
+                    "Hex literal has no digits after '0x'",
+                    self.line,
+                    self.col - (self.current - self.start),
+                )
             text = self.source[self.start:self.current]
-            # strip 0x/0X prefix
-            value_text = text[2:] if len(text) > 2 else "0"
-            value = int(value_text, 16) if value_text else 0
+            value = int(text[2:], 16)
+            self._check_range(value, text)
             self._add_token(TokenType.NUMBER, value)
             return
 
-        # Decimal integer literal (existing behavior)
+        # Decimal integer literal
         while self._peek().isdigit():
             self._advance()
-        if self._peek() == '.' and self._peek_next().isdigit():
-            # Simple integer-only language; don't allow floats, stop at dot
-            pass
         text = self.source[self.start:self.current]
-        self._add_token(TokenType.NUMBER, int(text))
+        value = int(text)
+        self._check_range(value, text)
+        self._add_token(TokenType.NUMBER, value)
 
     def _identifier(self):
         while self._peek().isalnum() or self._peek() == '_':

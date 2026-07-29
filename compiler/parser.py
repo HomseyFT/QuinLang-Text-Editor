@@ -152,10 +152,7 @@ class Parser:
             return A.InlineAsm(tok.literal, line=kw_tok.line, col=kw_tok.col)
         if self._match(TokenType.VM_ASM):
             kw_tok = self._previous()
-            stmt = self._vm_asm_block()
-            stmt.line = kw_tok.line
-            stmt.col = kw_tok.col
-            return stmt
+            return self._vm_asm_block(kw_tok)
         if self._match(TokenType.RETURN):
             tok = self._previous()
             value: Optional[A.Expr] = None
@@ -287,12 +284,14 @@ class Parser:
             break
         return expr
 
-    def _vm_asm_block(self) -> A.Stmt:
+    def _vm_asm_block(self, kw_tok: Token) -> A.Stmt:
         # Parse: vm_asm { INSTR ...; INSTR2 ...; }
         self._consume(TokenType.LEFT_BRACE, "Expected '{' after 'vm_asm'")
         lines = []
         current_parts = []
-        while not self._check(TokenType.RIGHT_BRACE):
+        # The _is_at_end() guard matters: _advance() stops incrementing at EOF,
+        # so without it an unterminated block spins forever.
+        while not self._check(TokenType.RIGHT_BRACE) and not self._is_at_end():
             tok = self._advance()
             if tok.type == TokenType.SEMICOLON:
                 # End of one vm_asm instruction line.
@@ -305,7 +304,7 @@ class Parser:
                 current_parts.append(tok.lexeme)
         self._consume(TokenType.RIGHT_BRACE, "Expected '}' after vm_asm block")
         code = "\n".join(lines)
-        return A.VmAsm(code)
+        return A.VmAsm(code, line=kw_tok.line, col=kw_tok.col)
 
     def _primary(self) -> A.Expr:
         if self._match(TokenType.FALSE):

@@ -2,8 +2,8 @@ import argparse
 from pathlib import Path
 from .resolver import ImportResolver, ResolveError
 from .sema import SemanticAnalyzer, SemanticError
-from .codegen_vm import CodeGenVM
-from runtime.vm import QuinVM
+from .codegen_vm import CodeGenVM, CodegenError
+from runtime.vm import QuinVM, VMError
 import sys
 
 
@@ -30,11 +30,16 @@ def main():
     except SemanticError as e:
         print(f"Semantic error: {e}", file=sys.stderr)
         sys.exit(1)
+    except CodegenError as e:
+        print(f"Codegen error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     vm = QuinVM(code, functions, strings)
-    exit_code = vm.run_main()
-    # For now, just print exit code on a newline to separate from program output
-    # print(f"\n[exit code {exit_code}]")
+    try:
+        vm.run_main()
+    except VMError as e:
+        print(f"Runtime error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

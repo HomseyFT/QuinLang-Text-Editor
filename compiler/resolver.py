@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import List, Set, Dict, Optional
 
 from . import ast as A
-from .lexer import Lexer
+from .lexer import Lexer, LexError
 from .parser import Parser, ParseError
 
 
@@ -95,7 +95,7 @@ class ImportResolver:
         try:
             tokens = Lexer(src_text).tokenize()
             program = Parser(tokens).parse()
-        except ParseError as e:
+        except (LexError, ParseError) as e:
             raise ResolveError(f"Syntax error in {file_path}:{e.line}:{e.col}: {e}")
 
         # Recursively resolve includes first (depth-first)

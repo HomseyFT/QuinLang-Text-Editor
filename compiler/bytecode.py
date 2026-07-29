@@ -50,6 +50,8 @@ class OpCode(Enum):
 
     # Stack management
     POP = auto()
+    DUP = auto()           # push a copy of the top of stack
+    SWAP = auto()          # exchange the top two stack entries
 
     # Builtin-style I/O
     PRINT_INT = auto()

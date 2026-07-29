@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 from . import ast as A
-from .compiler_types import type_from_name, Int
+from .compiler_types import type_from_name, Int, UnknownTypeError
 
 @dataclass
 class StackLayout:
@@ -20,7 +20,12 @@ class LayoutBuilder:
             if isinstance(st, A.VarDecl):
                 if st.name not in seen:
                     seen[st.name] = True
-                    t = type_from_name(st.type_name) if st.type_name else None
+                    try:
+                        t = type_from_name(st.type_name) if st.type_name else None
+                    except UnknownTypeError:
+                        # Sema validates type names; this backend is a frozen
+                        # artifact, so fall back to a word-sized slot instead.
+                        t = None
                     if t is None and st.init is not None:
                         # Fallback to 2-byte slot if unknown at layout time
                         sz = 2
