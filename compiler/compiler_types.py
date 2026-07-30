@@ -12,7 +12,19 @@ Int = Type("int", 2)
 Str = Type("str", 2)  # pointer to string data
 Void = Type("void", 0)
 Bool = Type("bool", 1)
+
+# QuinLang has two disjoint address spaces, and they are separate types so that
+# a pointer into one cannot be dereferenced as if it belonged to the other.
+#
+#   ptr     - an index into the current frame's locals, produced by '&'.
+#             Read/written with load16/store16/memcpy/memset.
+#   heapptr - a byte offset into the VM's heap, produced by alloc().
+#             Read/written with heap_load/heap_store.
+#
+# They are both 16-bit values, so nothing but the type system distinguishes
+# them; mixing them used to typecheck and silently read the wrong memory.
 Ptr = Type("ptr", 2)
+HeapPtr = Type("heapptr", 2)
 
 BUILTIN_TYPES: Dict[str, Type] = {
     "int": Int,
@@ -20,6 +32,7 @@ BUILTIN_TYPES: Dict[str, Type] = {
     "void": Void,
     "bool": Bool,
     "ptr": Ptr,
+    "heapptr": HeapPtr,
 }
 
 ARRAY_PREFIX = "int["

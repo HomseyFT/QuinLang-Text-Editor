@@ -46,15 +46,15 @@ fn main(): int {
     buf1[1] = 8;
     buf1[2] = 9;
 
-    // memcpy(buf2, buf1, 6)  ; 3 ints * 2 bytes each
-    memcpy(&buf2[0], &buf1[0], 6);
+    // memcpy counts slots (16-bit words), not bytes
+    memcpy(&buf2[0], &buf1[0], 3);
 
     print(buf2[0]);    // 7
     print(buf2[1]);    // 8
     print(buf2[2]);    // 9
 
-    // memset(buf2, 0, 6)
-    memset(&buf2[0], 0, 6);
+    // memset likewise counts slots
+    memset(&buf2[0], 0, 3);
 
     print(buf2[0]);    // 0
     print(buf2[1]);    // 0

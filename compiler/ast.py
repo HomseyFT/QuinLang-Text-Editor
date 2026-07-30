@@ -79,11 +79,6 @@ class Return(Stmt):
     value: Optional[Expr]
 
 @dataclass
-class InlineAsm(Stmt):
-    # Raw assembly text to be spliced into the 8086 backend output.
-    code: str
-
-@dataclass
 class VmAsm(Stmt):
     # VM-level inline IR to be lowered directly to VM bytecode.
     # The code is a small, line-based DSL understood by the VM backend.

@@ -5,7 +5,7 @@ from . import ast as A
 from .compiler_types import (
     Type, Int, Str, Void, Bool, Ptr, type_from_name, is_array_type, UnknownTypeError,
 )
-from .builtins import get_builtins, BuiltinSig
+from .builtins import get_builtins
 
 class SemanticError(Exception):
     def __init__(self, message: str, line: int = 0, col: int = 0):
@@ -19,7 +19,10 @@ class SemanticError(Exception):
             return f"[{self.line}:{self.col}] {self.message}"
         return self.message
 
-@dataclass
+# eq=False so that two same-named variables in sibling scopes are distinct
+# symbols, and so that Symbol stays hashable by identity: codegen keys frame
+# slots off these objects.
+@dataclass(eq=False)
 class Symbol:
     name: str
     type: Type
@@ -35,10 +38,11 @@ class Scope:
         self.parent = parent
         self.vars: Dict[str, Symbol] = {}
 
-    def define(self, sym: Symbol, line: int = 0, col: int = 0):
+    def define(self, sym: Symbol, line: int = 0, col: int = 0) -> Symbol:
         if sym.name in self.vars:
             raise SemanticError(f"Redeclaration of variable '{sym.name}'", line, col)
         self.vars[sym.name] = sym
+        return sym
 
     def resolve(self, name: str) -> Optional[Symbol]:
         scope: Optional[Scope] = self
@@ -48,10 +52,38 @@ class Scope:
             scope = scope.parent
         return None
 
+    def visible(self) -> Dict[str, Symbol]:
+        """Every name visible from here, with inner bindings shadowing outer ones."""
+        chain: List[Scope] = []
+        scope: Optional[Scope] = self
+        while scope is not None:
+            chain.append(scope)
+            scope = scope.parent
+        names: Dict[str, Symbol] = {}
+        for s in reversed(chain):
+            names.update(s.vars)
+        return names
+
 class Context:
+    """Everything the front end learned, for the backend to consume.
+
+    Name resolution and typing both happen here exactly once. A backend reads
+    these tables rather than walking scopes again, so there is a single
+    implementation of what a given identifier refers to.
+    """
+
     def __init__(self):
         self.functions: Dict[str, FunctionSig] = {}
         self.node_type: Dict[int, Type] = {}
+        # id(Identifier | VarDecl | Param) -> the Symbol it refers to or declares.
+        self.binding: Dict[int, Symbol] = {}
+        # Function name -> every symbol in its frame, parameters first (the
+        # calling convention requires them to lead) and then declarations in
+        # source order. Codegen turns this list straight into slots.
+        self.frame_symbols: Dict[str, List[Symbol]] = {}
+        # id(VmAsm) -> names visible at that block, since its body is raw text
+        # that no other pass resolves.
+        self.asm_scope: Dict[int, Dict[str, Symbol]] = {}
 
     def set_type(self, node: A.Expr, t: Type):
         self.node_type[id(node)] = t
@@ -59,9 +91,18 @@ class Context:
     def get_type(self, node: A.Expr) -> Type:
         return self.node_type[id(node)]
 
+    def bind(self, node: A.Node, sym: Symbol):
+        self.binding[id(node)] = sym
+
+    def binding_of(self, node: A.Node) -> Optional[Symbol]:
+        return self.binding.get(id(node))
+
 class SemanticAnalyzer:
     def __init__(self):
         self.ctx = Context()
+        # Symbols declared by the function currently being analyzed, in the
+        # order they will occupy frame slots.
+        self._frame: List[Symbol] = []
 
     def _resolve_type(self, name: str, line: int, col: int) -> Type:
         """Map a source-level type name onto a concrete Type, with location on failure."""
@@ -122,14 +163,19 @@ class SemanticAnalyzer:
     def _analyze_function(self, fn: A.Function):
         sig = self.ctx.functions[fn.name]
         scope = Scope()
+        self._frame = []
         for p, t in zip(fn.params, sig.params):
-            scope.define(Symbol(p.name, t), p.line, p.col)
+            sym = scope.define(Symbol(p.name, t), p.line, p.col)
+            self.ctx.bind(p, sym)
+            self._frame.append(sym)
         # Check if function body always returns
         always_returns = any(self._always_returns(st, scope, sig.ret) for st in fn.body)
         for st in fn.body:
             self._analyze_stmt(st, scope, sig.ret)
         if sig.ret != Void and not always_returns:
             raise SemanticError(f"Function '{fn.name}' missing return statement", fn.line, fn.col)
+        self.ctx.frame_symbols[fn.name] = self._frame
+        self._frame = []
 
     def _analyze_stmt(self, st: A.Stmt, scope: Scope, ret_type: Type = Void):
         if isinstance(st, A.VarDecl):
@@ -150,13 +196,16 @@ class SemanticAnalyzer:
                     )
             if var_type is None:
                 raise SemanticError(f"Cannot infer type for '{st.name}' without initializer", st.line, st.col)
-            scope.define(Symbol(st.name, var_type), st.line, st.col)
+            sym = scope.define(Symbol(st.name, var_type), st.line, st.col)
+            self.ctx.bind(st, sym)
+            self._frame.append(sym)
         elif isinstance(st, A.Assign):
             # Generalized assignment target
             if isinstance(st.target, A.Identifier):
                 sym = scope.resolve(st.target.name)
                 if sym is None:
                     raise SemanticError(f"Undeclared variable '{st.target.name}'", st.target.line, st.target.col)
+                self.ctx.bind(st.target, sym)
                 if is_array_type(sym.type):
                     raise SemanticError(
                         f"Cannot assign to array variable '{st.target.name}' as a whole; "
@@ -215,6 +264,11 @@ class SemanticAnalyzer:
                 self._analyze_stmt(s, body_scope, ret_type)
         elif isinstance(st, A.ExprStmt):
             self._analyze_expr(st.expr, scope)
+        elif isinstance(st, A.VmAsm):
+            # The block's body is raw text, so the only thing to resolve here is
+            # which names it can reach. Its stack effect is still unchecked; an
+            # imbalance surfaces as a VM error at RET.
+            self.ctx.asm_scope[id(st)] = scope.visible()
         else:
             # Ignore blocks etc.
             pass
@@ -261,6 +315,7 @@ class SemanticAnalyzer:
             sym = scope.resolve(e.name)
             if sym is None:
                 raise SemanticError(f"Undeclared variable '{e.name}'", e.line, e.col)
+            self.ctx.bind(e, sym)
             self.ctx.set_type(e, sym.type)
             return sym.type
         if isinstance(e, A.Unary):
@@ -310,6 +365,7 @@ class SemanticAnalyzer:
                 sym = scope.resolve(e.target.name)
                 if sym is None:
                     raise SemanticError(f"Undeclared variable '{e.target.name}'", e.target.line, e.target.col)
+                self.ctx.bind(e.target, sym)
                 self.ctx.set_type(e, Ptr)
                 return Ptr
             if isinstance(e.target, A.Index):

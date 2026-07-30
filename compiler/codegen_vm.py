@@ -1,10 +1,10 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List
 from . import ast as A
 from .bytecode import OpCode, Instruction, Bytecode
-from .sema import Context
-from .compiler_types import Int, Str, Bool, Void, array_length_from_name
+from .sema import Context, Symbol
+from .compiler_types import Int, Str, Bool, Void, array_length
 
 
 class CodegenError(Exception):
@@ -37,11 +37,10 @@ class FunctionLayout:
     num_locals: int
     num_params: int
     entry_pc: int = 0
-    # Parameter name -> slot. Parameters occupy slots 0..num_params-1.
-    params: Dict[str, LocalSlot] = field(default_factory=dict)
-    # id(A.VarDecl) -> slot. Keyed by node identity rather than by name so
-    # that shadowed and sibling-scope declarations get distinct storage.
-    decl_slots: Dict[int, LocalSlot] = field(default_factory=dict)
+    # Symbol -> slot, for every symbol sema recorded in this frame. Keyed by
+    # the Symbol object rather than by name, so shadowed and sibling-scope
+    # declarations get distinct storage for free.
+    slots: Dict[Symbol, LocalSlot] = field(default_factory=dict)
 
 
 class CodeGenVM:
@@ -60,8 +59,6 @@ class CodeGenVM:
         self._string_ids: Dict[str, int] = {}
         # map function name -> index used in CALL opcode
         self.func_name_to_index: Dict[str, int] = {}
-        # Lexical scope stack for the function currently being emitted.
-        self._scopes: List[Dict[str, LocalSlot]] = []
 
     # -- string table ----------------------------------------------------
 
@@ -78,36 +75,33 @@ class CodeGenVM:
         self.strings[sid] = value
         return sid
 
-    # -- scope handling --------------------------------------------------
+    # -- slot lookup -----------------------------------------------------
+    #
+    # Scoping lives entirely in sema. Codegen only maps the Symbol that sema
+    # already resolved a node to onto a frame slot, so the two passes cannot
+    # disagree about what a name refers to.
 
-    def _push_scope(self):
-        self._scopes.append({})
-
-    def _pop_scope(self):
-        self._scopes.pop()
-
-    def _declare(self, name: str, slot: LocalSlot):
-        self._scopes[-1][name] = slot
-
-    def _lookup(self, name: str) -> Optional[LocalSlot]:
-        for scope in reversed(self._scopes):
-            slot = scope.get(name)
-            if slot is not None:
-                return slot
-        return None
-
-    def _lookup_or_fail(self, name: str, node: A.Node) -> LocalSlot:
-        slot = self._lookup(name)
+    def _slot(self, node: A.Node, layout: FunctionLayout, ctx: Context) -> LocalSlot:
+        sym = ctx.binding_of(node)
+        if sym is None:
+            raise CodegenError(
+                f"[{node.line}:{node.col}] No binding recorded for this node; "
+                f"semantic analysis did not resolve it"
+            )
+        slot = layout.slots.get(sym)
         if slot is None:
-            raise CodegenError(f"[{node.line}:{node.col}] Unresolved name '{name}'")
+            raise CodegenError(
+                f"[{node.line}:{node.col}] Symbol '{sym.name}' has no slot in "
+                f"function '{layout.name}'"
+            )
         return slot
 
-    def _array_slot(self, e: A.Expr) -> LocalSlot:
+    def _array_slot(self, e: A.Expr, layout: FunctionLayout, ctx: Context) -> LocalSlot:
         if not isinstance(e, A.Identifier):
             raise CodegenError(
                 f"[{e.line}:{e.col}] Only named local arrays can be indexed"
             )
-        slot = self._lookup_or_fail(e.name, e)
+        slot = self._slot(e, layout, ctx)
         if not slot.is_array:
             raise CodegenError(f"[{e.line}:{e.col}] '{e.name}' is not an array")
         return slot
@@ -121,7 +115,7 @@ class CodeGenVM:
             if fn.name in self.func_name_to_index:
                 raise CodegenError(f"[{fn.line}:{fn.col}] Duplicate function '{fn.name}'")
             self.func_name_to_index[fn.name] = len(self.functions)
-            self.functions.append(self._build_layout(fn))
+            self.functions.append(self._build_layout(fn, ctx))
 
         for fn, layout in zip(program.functions, self.functions):
             layout.entry_pc = len(self.code)
@@ -134,81 +128,63 @@ class CodeGenVM:
         ]
         return self.code, fns, self.strings
 
-    def _build_layout(self, fn: A.Function) -> FunctionLayout:
-        """Assign a distinct slot to every parameter and every declaration.
+    def _build_layout(self, fn: A.Function, ctx: Context) -> FunctionLayout:
+        """Give every symbol sema found in this frame its own slot.
 
-        Slots are never reused across sibling scopes. That costs a few frame
-        slots but guarantees two declarations of the same name can't collide.
+        Sema lists parameters first, which the calling convention requires:
+        CALL drops arguments into the callee's leading locals. Slots are never
+        reused across sibling scopes, so two declarations of the same name
+        cannot collide.
         """
-        params: Dict[str, LocalSlot] = {}
-        decl_slots: Dict[int, LocalSlot] = {}
+        symbols = ctx.frame_symbols.get(fn.name)
+        if symbols is None:
+            raise CodegenError(
+                f"[{fn.line}:{fn.col}] No frame recorded for function '{fn.name}'"
+            )
+
+        slots: Dict[Symbol, LocalSlot] = {}
         next_idx = 0
+        for sym in symbols:
+            length = array_length(sym.type) or 0
+            slots[sym] = LocalSlot(next_idx, length)
+            next_idx += length if length else 1
 
-        for p in fn.params:
-            if p.name in params:
-                raise CodegenError(
-                    f"[{p.line}:{p.col}] Duplicate parameter '{p.name}' in function '{fn.name}'"
-                )
-            params[p.name] = LocalSlot(next_idx)
-            next_idx += 1
-
-        def visit(stmts: List[A.Stmt]) -> None:
-            nonlocal next_idx
-            for st in stmts:
-                if isinstance(st, A.VarDecl):
-                    length = array_length_from_name(st.type_name) or 0
-                    decl_slots[id(st)] = LocalSlot(next_idx, length)
-                    next_idx += length if length else 1
-                elif isinstance(st, A.If):
-                    visit(st.then_block)
-                    if st.else_block:
-                        visit(st.else_block)
-                elif isinstance(st, A.While):
-                    visit(st.body)
-
-        visit(fn.body)
         return FunctionLayout(
             name=fn.name,
             num_locals=next_idx,
             num_params=len(fn.params),
-            params=params,
-            decl_slots=decl_slots,
+            slots=slots,
         )
 
     def _emit_function(self, fn: A.Function, layout: FunctionLayout, ctx: Context):
-        # The function body shares a scope with the parameters, matching sema.
-        self._scopes = [dict(layout.params)]
         for st in fn.body:
             self._emit_stmt(st, layout, ctx)
         # Fall-through epilogue. Every function returns exactly one value, so
         # this runs even for void functions; the caller discards it.
         self.code.append(Instruction(OpCode.PUSH_INT, 0))
         self.code.append(Instruction(OpCode.RET))
-        self._scopes = []
 
     # -- statements ------------------------------------------------------
 
     def _emit_stmt(self, st: A.Stmt, layout: FunctionLayout, ctx: Context):
         if isinstance(st, A.VarDecl):
-            slot = layout.decl_slots[id(st)]
+            slot = self._slot(st, layout, ctx)
             if slot.is_array:
-                self._declare(st.name, slot)
                 for offset in range(slot.length):
                     self.code.append(Instruction(OpCode.PUSH_INT, 0))
                     self.code.append(Instruction(OpCode.STORE_LOCAL, slot.index + offset))
             else:
-                # Evaluate the initializer before binding the name, so that
-                # `let x = x + 1;` reads the outer x. This matches sema, which
-                # analyzes the initializer before calling scope.define().
+                # `let x = x + 1;` reads the outer x: sema resolved the
+                # initializer's identifiers before defining this one, so they
+                # already point at the outer symbol.
                 if st.init is not None:
                     self._emit_expr(st.init, layout, ctx)
                 else:
                     self.code.append(Instruction(OpCode.PUSH_INT, 0))
-                self._declare(st.name, slot)
                 self.code.append(Instruction(OpCode.STORE_LOCAL, slot.index))
         elif isinstance(st, A.Assign):
             if isinstance(st.target, A.Identifier):
-                slot = self._lookup_or_fail(st.target.name, st.target)
+                slot = self._slot(st.target, layout, ctx)
                 if slot.is_array:
                     raise CodegenError(
                         f"[{st.target.line}:{st.target.col}] Cannot assign to array '{st.target.name}' as a whole"
@@ -216,7 +192,7 @@ class CodeGenVM:
                 self._emit_expr(st.value, layout, ctx)
                 self.code.append(Instruction(OpCode.STORE_LOCAL, slot.index))
             elif isinstance(st.target, A.Index):
-                slot = self._array_slot(st.target.array)
+                slot = self._array_slot(st.target.array, layout, ctx)
                 # STORE_LOCAL_IDX pops the index, then the value.
                 self._emit_expr(st.value, layout, ctx)
                 self._emit_expr(st.target.index, layout, ctx)
@@ -259,11 +235,8 @@ class CodeGenVM:
             self._emit_if(st, layout, ctx)
         elif isinstance(st, A.While):
             self._emit_while(st, layout, ctx)
-        elif isinstance(st, A.InlineAsm):
-            # VM backend ignores raw 8086 inline asm; only the 8086 backend executes it.
-            return
         elif isinstance(st, A.VmAsm):
-            self._emit_vm_asm(st, layout)
+            self._emit_vm_asm(st, layout, ctx)
         else:
             raise CodegenError(
                 f"[{st.line}:{st.col}] Unsupported statement type {type(st).__name__}"
@@ -273,20 +246,16 @@ class CodeGenVM:
         self._emit_expr(st.cond, layout, ctx)
         jz_index = len(self.code)
         self.code.append(Instruction(OpCode.JZ, 0))  # arg to be patched
-        self._push_scope()
         for s in st.then_block:
             self._emit_stmt(s, layout, ctx)
-        self._pop_scope()
         # jump over else
         jmp_index = len(self.code)
         self.code.append(Instruction(OpCode.JMP, 0))
         # patch JZ to else start
         self.code[jz_index].arg = len(self.code)
         if st.else_block:
-            self._push_scope()
             for s in st.else_block:
                 self._emit_stmt(s, layout, ctx)
-            self._pop_scope()
         self.code[jmp_index].arg = len(self.code)
 
     def _emit_while(self, st: A.While, layout: FunctionLayout, ctx: Context):
@@ -294,14 +263,12 @@ class CodeGenVM:
         self._emit_expr(st.cond, layout, ctx)
         jz_index = len(self.code)
         self.code.append(Instruction(OpCode.JZ, 0))
-        self._push_scope()
         for s in st.body:
             self._emit_stmt(s, layout, ctx)
-        self._pop_scope()
         self.code.append(Instruction(OpCode.JMP, loop_start))
         self.code[jz_index].arg = len(self.code)
 
-    def _emit_vm_asm(self, vm_asm: A.VmAsm, layout: FunctionLayout) -> None:
+    def _emit_vm_asm(self, vm_asm: A.VmAsm, layout: FunctionLayout, ctx: Context) -> None:
         """Lower a vm_asm inline block into VM bytecode.
 
         Supported v1 instructions (line-based, each ending with ';'):
@@ -313,7 +280,16 @@ class CodeGenVM:
 
         Lines are parsed by splitting on whitespace; semicolons are kept by the
         parser but are not semantically significant here.
+
+        The body is raw text, so sema cannot resolve its names as it walks
+        expressions. Instead it records the scope in effect at this block, and
+        NAME is looked up there.
         """
+        visible = ctx.asm_scope.get(id(vm_asm))
+        if visible is None:
+            raise CodegenError(
+                f"[{vm_asm.line}:{vm_asm.col}] No scope recorded for this vm_asm block"
+            )
         simple_ops = {
             "add": OpCode.ADD,
             "sub": OpCode.SUB,
@@ -352,11 +328,12 @@ class CodeGenVM:
                 self.code.append(Instruction(OpCode.PUSH_INT, value & 0xFFFF))
             elif op in local_ops and len(args) == 1:
                 name = args[0]
-                slot = self._lookup(name)
-                if slot is None:
+                sym = visible.get(name)
+                if sym is None:
                     raise CodegenError(
                         f"[{vm_asm.line}:{vm_asm.col}] vm_asm {op}: unknown local '{name}'"
                     )
+                slot = layout.slots[sym]
                 if slot.is_array:
                     raise CodegenError(
                         f"[{vm_asm.line}:{vm_asm.col}] vm_asm {op}: '{name}' is an array; index it explicitly"
@@ -398,7 +375,7 @@ class CodeGenVM:
                     f"[{e.line}:{e.col}] Unsupported literal {e.value!r}"
                 )
         elif isinstance(e, A.Identifier):
-            slot = self._lookup_or_fail(e.name, e)
+            slot = self._slot(e, layout, ctx)
             if slot.is_array:
                 raise CodegenError(
                     f"[{e.line}:{e.col}] Array '{e.name}' has no value form; index it or take its address"
@@ -407,10 +384,10 @@ class CodeGenVM:
         elif isinstance(e, A.AddressOf):
             # A pointer is a local index into the current frame.
             if isinstance(e.target, A.Identifier):
-                slot = self._lookup_or_fail(e.target.name, e.target)
+                slot = self._slot(e.target, layout, ctx)
                 self.code.append(Instruction(OpCode.PUSH_INT, slot.index))
             elif isinstance(e.target, A.Index):
-                slot = self._array_slot(e.target.array)
+                slot = self._array_slot(e.target.array, layout, ctx)
                 # pointer = base + index
                 self._emit_expr(e.target.index, layout, ctx)
                 self.code.append(Instruction(OpCode.PUSH_INT, slot.index))
@@ -430,7 +407,7 @@ class CodeGenVM:
         elif isinstance(e, A.Binary):
             self._emit_binary(e, layout, ctx)
         elif isinstance(e, A.Index):
-            slot = self._array_slot(e.array)
+            slot = self._array_slot(e.array, layout, ctx)
             self._emit_expr(e.index, layout, ctx)
             self.code.append(Instruction(OpCode.LOAD_LOCAL_IDX, slot.index))
         elif isinstance(e, A.Call):
@@ -501,7 +478,7 @@ class CodeGenVM:
         # array_push(xs: int[N], len: int, value: int) -> int (new len)
         if name == "array_push" and len(e.args) == 3:
             arr_expr, len_expr, val_expr = e.args
-            slot = self._array_slot(arr_expr)
+            slot = self._array_slot(arr_expr, layout, ctx)
             # Evaluate len once and duplicate it: it is needed both as the
             # store index and as the basis for the returned new length.
             self._emit_expr(len_expr, layout, ctx)      # [len]
@@ -516,7 +493,7 @@ class CodeGenVM:
         # array_pop(xs: int[N], len: int) -> int (popped value)
         if name == "array_pop" and len(e.args) == 2:
             arr_expr, len_expr = e.args
-            slot = self._array_slot(arr_expr)
+            slot = self._array_slot(arr_expr, layout, ctx)
             self._emit_expr(len_expr, layout, ctx)
             self.code.append(Instruction(OpCode.PUSH_INT, 1))
             self.code.append(Instruction(OpCode.SUB))   # len - 1

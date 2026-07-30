@@ -11,10 +11,10 @@ fn main(): int {
     let z: int = 42;
 
     if (ct_eq(x, y)) {
-        println("x == y$");
+        println("x == y");
     }
     if (!ct_eq(x, z)) {
-        println("x != z$");
+        println("x != z");
     }
 
     let r1: int = choose(10, 20, 1);

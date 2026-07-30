@@ -23,8 +23,9 @@ def get_builtins() -> Dict[str, BuiltinSig]:
         # ct_select(mask, x, y): returns x when mask != 0, else y.
         # Intended usage is mask in {0,1}.
         "ct_select":  (["int", "int", "int"], "int"),
-        # Heap allocation and access
-        "alloc":      (["int"], "ptr"),
-        "heap_load":  (["ptr"], "int"),
-        "heap_store": (["ptr", "int"], "void"),
+        # Heap allocation and access. These use 'heapptr', a different address
+        # space from the frame-relative 'ptr' that '&' produces.
+        "alloc":      (["int"], "heapptr"),
+        "heap_load":  (["heapptr"], "int"),
+        "heap_store": (["heapptr", "int"], "void"),
     }

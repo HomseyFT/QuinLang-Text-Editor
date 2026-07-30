@@ -51,9 +51,9 @@ class TokenType(Enum):
     STR = auto()
     VOID = auto()
     PTR = auto()
+    HEAPPTR = auto()
     PRINT = auto()
     PRINTLN = auto()
-    ASM = auto()
     VM_ASM = auto()
     INCLUDE = auto()
 
@@ -74,7 +74,7 @@ KEYWORDS = {
     "print": TokenType.PRINT,
     "println": TokenType.PRINTLN,
     "ptr": TokenType.PTR,
-    "asm": TokenType.ASM,
+    "heapptr": TokenType.HEAPPTR,
     "vm_asm": TokenType.VM_ASM,
     "include": TokenType.INCLUDE,
 }

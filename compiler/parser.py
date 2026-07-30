@@ -91,6 +91,8 @@ class Parser:
             base = "void"
         elif self._match(TokenType.PTR):
             base = "ptr"
+        elif self._match(TokenType.HEAPPTR):
+            base = "heapptr"
         else:
             # allow identifiers for user-defined types in future
             tok = self._consume(TokenType.IDENTIFIER, "Expected type name")
@@ -144,12 +146,6 @@ class Parser:
             self._consume(TokenType.RIGHT_PAREN, "Expected ')' after println expression")
             self._consume(TokenType.SEMICOLON, "Expected ';' after println statement")
             return A.PrintLn(expr, line=tok.line, col=tok.col)
-        if self._match(TokenType.ASM):
-            # Simple inline 8086 asm form: asm "...";
-            kw_tok = self._previous()
-            tok = self._consume(TokenType.STRING, "Expected string literal after 'asm'")
-            self._consume(TokenType.SEMICOLON, "Expected ';' after asm statement")
-            return A.InlineAsm(tok.literal, line=kw_tok.line, col=kw_tok.col)
         if self._match(TokenType.VM_ASM):
             kw_tok = self._previous()
             return self._vm_asm_block(kw_tok)
