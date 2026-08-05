@@ -20,9 +20,11 @@ class TokenType(Enum):
     COLON = auto()
     EQUAL = auto()
     AMP = auto()
+    AT = auto()
 
     # One or two character tokens
     BANG = auto()
+    TILDE = auto()
     BANG_EQUAL = auto()
     EQUAL_EQUAL = auto()
     GREATER = auto()
@@ -32,6 +34,10 @@ class TokenType(Enum):
     AND_AND = auto()
     OR_OR = auto()
     PERCENT = auto()  # New token type for modulo operator
+    CARET = auto()    # New token type for bitwise XOR operator
+    PIPE = auto()     # New token type for bitwise OR operator
+    SHL = auto()      # New token type for left shift operator
+    SHR = auto()      # New token type for right shift operator
 
     # Literals
     IDENTIFIER = auto()

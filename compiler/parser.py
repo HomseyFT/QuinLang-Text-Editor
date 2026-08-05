@@ -196,11 +196,38 @@ class Parser:
         return expr
 
     def _and(self) -> A.Expr:
-        expr = self._equality()
+        expr = self._bitor()
         while self._match(TokenType.AND_AND):
             op_tok = self._previous()
             op = op_tok.lexeme
+            right = self._bitor()
+            expr = A.Binary(expr, op, right, line=op_tok.line, col=op_tok.col)
+        return expr
+
+    def _bitor(self) -> A.Expr:
+        expr = self._bitxor()
+        while self._match(TokenType.PIPE):
+            op_tok = self._previous()
+            op = op_tok.lexeme
+            right = self._bitxor()
+            expr = A.Binary(expr, op, right, line=op_tok.line, col=op_tok.col)
+        return expr
+
+    def _bitand(self) -> A.Expr:
+        expr = self._equality()
+        while self._match(TokenType.AMP):
+            op_tok = self._previous()
+            op = op_tok.lexeme
             right = self._equality()
+            expr = A.Binary(expr, op, right, line=op_tok.line, col=op_tok.col)
+        return expr
+
+    def _bitxor(self) -> A.Expr:
+        expr = self._bitand()
+        while self._match(TokenType.CARET):
+            op_tok = self._previous()
+            op = op_tok.lexeme
+            right = self._bitand()
             expr = A.Binary(expr, op, right, line=op_tok.line, col=op_tok.col)
         return expr
 
@@ -214,8 +241,17 @@ class Parser:
         return expr
 
     def _comparison(self) -> A.Expr:
-        expr = self._term()
+        expr = self._shift()
         while self._match(TokenType.GREATER, TokenType.GREATER_EQUAL, TokenType.LESS, TokenType.LESS_EQUAL):
+            op_tok = self._previous()
+            op = op_tok.lexeme
+            right = self._shift()
+            expr = A.Binary(expr, op, right, line=op_tok.line, col=op_tok.col)
+        return expr
+
+    def _shift(self) -> A.Expr:
+        expr = self._term()
+        while self._match(TokenType.SHL, TokenType.SHR):
             op_tok = self._previous()
             op = op_tok.lexeme
             right = self._term()
@@ -242,11 +278,11 @@ class Parser:
 
     def _unary(self) -> A.Expr:
         # Address-of: &expr (limited to identifiers and indexing at sema/codegen)
-        if self._match(TokenType.AMP):
+        if self._match(TokenType.AT):
             tok = self._previous()
             target = self._unary()
             return A.AddressOf(target, line=tok.line, col=tok.col)
-        if self._match(TokenType.BANG, TokenType.MINUS):
+        if self._match(TokenType.BANG, TokenType.MINUS, TokenType.TILDE):
             tok = self._previous()
             op = tok.lexeme
             right = self._unary()

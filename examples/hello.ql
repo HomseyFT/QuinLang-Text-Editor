@@ -28,8 +28,8 @@ fn main(): int {
     a = 1234;
     b = 0;
 
-    pa = &a;
-    pb = &b;
+    pa = @a;
+    pb = @b;
 
     // store16 & load16
     store16(pa, 4321);
@@ -47,14 +47,14 @@ fn main(): int {
     buf1[2] = 9;
 
     // memcpy counts slots (16-bit words), not bytes
-    memcpy(&buf2[0], &buf1[0], 3);
+    memcpy(@buf2[0], @buf1[0], 3);
 
     print(buf2[0]);    // 7
     print(buf2[1]);    // 8
     print(buf2[2]);    // 9
 
     // memset likewise counts slots
-    memset(&buf2[0], 0, 3);
+    memset(@buf2[0], 0, 3);
 
     print(buf2[0]);    // 0
     print(buf2[1]);    // 0

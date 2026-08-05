@@ -16,6 +16,11 @@ class OpCode(Enum):
     MUL = auto()
     DIV = auto()
     MOD = auto()
+    XOR = auto()
+    AND = auto()
+    OR = auto()
+    SHL = auto()
+    SHR = auto()
     NEG = auto()
 
     # Comparisons (push 0/1)
@@ -28,6 +33,7 @@ class OpCode(Enum):
 
     # Logical
     NOT = auto()
+    BITNOT = auto()
 
     # Control flow
     JMP = auto()           # operand: target pc
