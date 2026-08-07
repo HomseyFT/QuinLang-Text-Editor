@@ -158,8 +158,11 @@ import — leaving the IDE unable to start at all.
 
 `ide/runner.py` therefore drives a **stock, unmodified** `QuinVM`:
 
-- **Output** — `QuinVM` prints to stdout, so the runner redirects `sys.stdout`
-  for the duration of the run and forwards writes to the output panel.
+- **Output** — `QuinVM`'s print opcodes call the builtin `print()`, so the runner
+  binds a `print()` into `runtime.vm`'s *module namespace* for the duration of
+  the run. Python resolves a bare name through module globals before builtins,
+  so this captures VM output only — process-wide `sys.stdout` is never touched,
+  and anything else printing during a run is unaffected.
 - **Stopping** — a thread trace hook raises `ExecutionStopped` (defined in
   `ide/runner.py`) at the VM's next function call.
 
