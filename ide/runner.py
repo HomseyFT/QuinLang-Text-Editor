@@ -10,12 +10,16 @@ ExecutionStopped; each sync deleted them again and broke the IDE.
 Output capture and cancellation are therefore implemented entirely on this side,
 against the stock upstream QuinVM:
 
-  * output  - QuinVM's PRINT opcodes call print(), so stdout is redirected for
-              the duration of the run and forwarded to the callback.
+  * output   - QuinVM's PRINT opcodes call the builtin print(), so a print() is
+               bound inside runtime.vm's module namespace for the duration of
+               the run. Python resolves a bare name through module globals
+               before builtins, so this intercepts the VM's output without
+               editing vm.py and without touching process-wide stdout.
   * stopping - a thread-local trace function raises ExecutionStopped at the next
-              function call the VM makes.
+               function call the VM makes.
 """
 from __future__ import annotations
+import builtins
 import contextlib
 import sys
 import threading
@@ -27,6 +31,7 @@ from compiler.lexer import Lexer
 from compiler.parser import Parser, ParseError
 from compiler.sema import SemanticAnalyzer, SemanticError
 from compiler.codegen_vm import CodeGenVM
+from runtime import vm as vm_module
 from runtime.vm import QuinVM, VMError
 
 
@@ -49,22 +54,36 @@ class RunResult:
     error_message: Optional[str] = None
 
 
-class _CallbackStream:
-    """Minimal file-like object that forwards writes to a callback."""
+_UNSET = object()
 
-    def __init__(self, on_write: Callable[[str], None]):
-        self._on_write = on_write
 
-    def write(self, text: str) -> int:
-        if text:
-            self._on_write(text)
-        return len(text)
+@contextlib.contextmanager
+def _capture_vm_output(on_output: Callable[[str], None]):
+    """
+    Route QuinVM's print() output to `on_output` for the duration of the block.
 
-    def flush(self) -> None:
-        pass
+    Binds a print() into runtime.vm's module globals, which shadows the builtin
+    for code inside that module only. Nothing else in the process is affected,
+    and vm.py itself is never modified - so the next compiler sync can't undo it.
+    """
+    def _vm_print(*args, sep: str = " ", end: str = "\n", file=None, flush: bool = False):
+        # An explicit file= isn't ours to capture; hand it back to the builtin.
+        if file is not None:
+            builtins.print(*args, sep=sep, end=end, file=file, flush=flush)
+            return
+        on_output(sep.join(str(a) for a in args) + end)
 
-    def isatty(self) -> bool:
-        return False
+    previous = vm_module.__dict__.get("print", _UNSET)
+    vm_module.print = _vm_print
+    try:
+        yield
+    finally:
+        # Restore exactly: normally there is no module-level `print`, so the
+        # name must be removed rather than set to the builtin.
+        if previous is _UNSET:
+            vm_module.__dict__.pop("print", None)
+        else:
+            vm_module.print = previous
 
 
 class Runner:
@@ -133,11 +152,10 @@ class Runner:
                 raise ExecutionStopped()
 
             vm = QuinVM(code, functions, strings)
-            stream = _CallbackStream(self._on_output)
 
             sys.settrace(self._trace)
             try:
-                with contextlib.redirect_stdout(stream):
+                with _capture_vm_output(self._on_output):
                     exit_code = vm.run_main()
             finally:
                 sys.settrace(None)
