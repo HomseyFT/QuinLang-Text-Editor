@@ -7,6 +7,7 @@ from tkinter import ttk
 import subprocess
 import threading
 import os
+import signal
 from pathlib import Path
 from typing import Optional, List, Callable
 
@@ -133,6 +134,7 @@ class CommandLine(ttk.Frame):
         self._command_entry.bind("<Up>", self._on_history_up)
         self._command_entry.bind("<Down>", self._on_history_down)
         self._command_entry.bind("<Escape>", self._on_escape)
+        self._command_entry.bind("<Control-c>", self._on_interrupt)
         
         # Click anywhere in terminal to focus input
         # Use ButtonRelease and after() to ensure focus happens after click processing
@@ -146,7 +148,10 @@ class CommandLine(ttk.Frame):
         output_frame.bind("<Button-1>", focus_entry)
         
         # Initial message
-        self._append_output("Terminal ready. Click here and type commands.\n", "info")
+        self._append_output(
+            "Terminal ready. Click here and type commands (Ctrl+C stops a running command).\n",
+            "info",
+        )
         
         # Auto-focus the entry after widget is mapped
         self._command_entry.bind("<Map>", lambda e: self.after(100, focus_entry))
@@ -225,6 +230,13 @@ class CommandLine(ttk.Frame):
         self._set_command("")
         self._history_index = len(self._history)
         return "break"
+
+    def _on_interrupt(self, event=None):
+        """Ctrl+C - stop the running command, or fall through to copy."""
+        if self._running_process is None:
+            return None  # nothing running; let Tk's default copy binding run
+        self.stop_running()
+        return "break"
     
     def _execute_command(self, command: str):
         """Execute a shell command."""
@@ -245,6 +257,14 @@ class CommandLine(ttk.Frame):
             self._clear_output()
             return
         
+        # Refuse to start a second command while one is live, otherwise the
+        # handle to the first is overwritten and it can never be stopped.
+        if self._running_process is not None:
+            self._append_output(
+                "A command is still running. Press Ctrl+C to stop it.\n", "error"
+            )
+            return
+
         # Run external command in thread
         threading.Thread(
             target=self._run_subprocess,
@@ -262,11 +282,10 @@ class CommandLine(ttk.Frame):
             self._append_output("cd -: not implemented\n", "info")
             return
         else:
-            # Resolve path
-            if path_str.startswith("~"):
-                new_path = Path.home() / path_str[2:]
-            else:
-                new_path = self._cwd / path_str
+            # expanduser handles "~", "~/x" and "~user" correctly; slicing off
+            # two characters mangled anything that wasn't exactly "~/".
+            expanded = Path(path_str).expanduser()
+            new_path = expanded if expanded.is_absolute() else self._cwd / expanded
         
         try:
             new_path = new_path.resolve()
@@ -281,6 +300,13 @@ class CommandLine(ttk.Frame):
     def _run_subprocess(self, command: str):
         """Run a subprocess and capture output."""
         try:
+            # Put the shell in its own process group so stopping it also stops
+            # the children it spawned, rather than orphaning them.
+            if os.name == 'nt':
+                extra = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP}
+            else:
+                extra = {'start_new_session': True}
+
             # Use shell=True for Windows compatibility
             self._running_process = subprocess.Popen(
                 command,
@@ -290,6 +316,7 @@ class CommandLine(ttk.Frame):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                **extra,
             )
             
             # Read output line by line
@@ -322,7 +349,16 @@ class CommandLine(ttk.Frame):
     
     def _append_output_threadsafe(self, text: str, tag: Optional[str] = None):
         """Append text to output from any thread."""
-        self.after(0, lambda: self._append_output(text, tag))
+        def apply():
+            try:
+                self._append_output(text, tag)
+            except tk.TclError:
+                pass  # widget destroyed while the command was finishing
+
+        try:
+            self.after(0, apply)
+        except tk.TclError:
+            pass  # interpreter already torn down
     
     def _clear_output(self):
         """Clear the output display."""
@@ -335,10 +371,32 @@ class CommandLine(ttk.Frame):
         self._command_entry.focus_set()
     
     def stop_running(self):
-        """Stop any running process."""
-        if self._running_process:
+        """Stop any running process, escalating to SIGKILL if it ignores us."""
+        process = self._running_process
+        if process is None:
+            return
+
+        try:
+            if os.name == 'nt':
+                process.terminate()
+            else:
+                # Signal the whole group; shell=True means the command we care
+                # about is a child of the shell, not the shell itself.
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+        except Exception:
+            return
+
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
             try:
-                self._running_process.terminate()
-                self._append_output("\n[Process terminated]\n", "error")
-            except Exception:
+                if os.name == 'nt':
+                    process.kill()
+                else:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
                 pass
+
+        self._append_output_threadsafe("\n[Process terminated]\n", "error")

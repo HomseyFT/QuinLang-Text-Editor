@@ -18,9 +18,9 @@ import urllib.error
 
 
 # Configuration - UPDATE THESE FOR YOUR REPO
-GITHUB_OWNER = "YOUR_GITHUB_USERNAME"  # Change this!
-GITHUB_REPO = "QuinLang-IDE"
-CURRENT_VERSION = "0.1.13"  # Increment this with each release
+GITHUB_OWNER = "HomseyFT"
+GITHUB_REPO = "QuinLang-Text-Editor"
+CURRENT_VERSION = "2.0.0"  # Bumped automatically by .github/workflows/sync-compiler.yml
 
 
 @dataclass
@@ -50,13 +50,42 @@ def get_executable_path() -> Optional[Path]:
 
 
 def parse_version(version: str) -> Tuple[int, ...]:
-    """Parse version string to tuple for comparison."""
-    # Remove 'v' prefix if present
-    version = version.lstrip('v')
-    try:
-        return tuple(int(x) for x in version.split('.'))
-    except (ValueError, AttributeError):
-        return (0,)
+    """
+    Parse a version string to a comparable tuple.
+
+    Normalised to three components so "2.0" and "2.0.0" compare equal rather
+    than "2.0" sorting below. Any pre-release suffix ("2.0.0-beta") is dropped.
+    """
+    if not isinstance(version, str):
+        return (0, 0, 0)
+
+    version = version.strip().lstrip('vV').split('-')[0].split('+')[0]
+
+    parts = []
+    for chunk in version.split('.')[:3]:
+        digits = ''.join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+
+    while len(parts) < 3:
+        parts.append(0)
+
+    return tuple(parts)
+
+
+def is_asset_for_platform(name: str) -> bool:
+    """
+    Does this release asset target the platform we're running on?
+
+    Matches the explicit '-windows-x64' / '-linux-x64' names the release
+    workflow publishes, and still recognises bare 'QuinLangIDE' /
+    'QuinLangIDE.exe' from older releases.
+    """
+    lowered = name.lower()
+    is_exe = lowered.endswith('.exe')
+
+    if sys.platform == 'win32':
+        return is_exe and 'linux' not in lowered
+    return not is_exe and 'windows' not in lowered
 
 
 def is_newer_version(remote: str, current: str) -> bool:
@@ -89,20 +118,15 @@ def check_for_updates() -> Optional[ReleaseInfo]:
             return None
         
         # Find the right asset for this platform
-        assets = data.get('assets', [])
         download_url = None
-        
-        if sys.platform == 'win32':
-            for asset in assets:
-                if 'windows' in asset['name'].lower() and asset['name'].endswith('.exe'):
-                    download_url = asset['browser_download_url']
-                    break
-        else:  # Linux
-            for asset in assets:
-                if 'linux' in asset['name'].lower() and not asset['name'].endswith('.exe'):
-                    download_url = asset['browser_download_url']
-                    break
-        
+        for asset in data.get('assets', []):
+            name = asset.get('name', '')
+            if name and is_asset_for_platform(name):
+                download_url = asset.get('browser_download_url')
+                break
+
+        # A release with no binary for this platform is not an update we can
+        # apply, so report "no update" rather than prompting a dead download.
         if not download_url:
             return None
         
@@ -149,11 +173,33 @@ def download_update(
                     
                     if progress_callback and total_size:
                         progress_callback(downloaded, total_size)
-        
+
+        # This file is about to replace the running executable, so refuse
+        # anything that isn't actually a binary (an HTML error page, a
+        # truncated download, an empty file).
+        if not _looks_like_executable(temp_path):
+            temp_path.unlink(missing_ok=True)
+            return None
+
         return temp_path
-    
+
     except (urllib.error.URLError, IOError, TimeoutError):
         return None
+
+
+def _looks_like_executable(path: Path) -> bool:
+    """Check the file starts with a PE ('MZ') or ELF magic number."""
+    try:
+        if path.stat().st_size < 1024:
+            return False
+        with open(path, 'rb') as f:
+            magic = f.read(4)
+    except OSError:
+        return False
+
+    if sys.platform == 'win32':
+        return magic[:2] == b'MZ'
+    return magic == b'\x7fELF'
 
 
 def apply_update(downloaded_path: Path) -> bool:

@@ -348,8 +348,16 @@ class QuinLangIDE:
 
     def _on_close(self):
         """Handle window close."""
-        if self.tab_manager.check_all_saved():
-            self.root.destroy()
+        if not self.tab_manager.check_all_saved():
+            return
+
+        # Don't leave the user's shell command or program running after the
+        # window is gone.
+        self.terminal.stop_running()
+        if self.runner.is_running:
+            self.runner.stop()
+
+        self.root.destroy()
 
     def _check_for_updates(self):
         """Check for updates in background."""

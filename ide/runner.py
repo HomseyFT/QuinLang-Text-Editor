@@ -1,7 +1,23 @@
 """
 Compiler/VM runner with output capture and threading support.
+
+Important: runtime/ and compiler/ are overwritten wholesale by
+.github/workflows/sync-compiler.yml on every sync from the QuinLang repo, so
+nothing here may depend on IDE-specific hooks living inside those files. Earlier
+versions patched runtime/vm.py to add output_callback/request_stop/
+ExecutionStopped; each sync deleted them again and broke the IDE.
+
+Output capture and cancellation are therefore implemented entirely on this side,
+against the stock upstream QuinVM:
+
+  * output  - QuinVM's PRINT opcodes call print(), so stdout is redirected for
+              the duration of the run and forwarded to the callback.
+  * stopping - a thread-local trace function raises ExecutionStopped at the next
+              function call the VM makes.
 """
 from __future__ import annotations
+import contextlib
+import sys
 import threading
 from typing import Callable, Optional
 from dataclasses import dataclass
@@ -11,7 +27,11 @@ from compiler.lexer import Lexer
 from compiler.parser import Parser, ParseError
 from compiler.sema import SemanticAnalyzer, SemanticError
 from compiler.codegen_vm import CodeGenVM
-from runtime.vm import QuinVM, ExecutionStopped
+from runtime.vm import QuinVM, VMError
+
+
+class ExecutionStopped(Exception):
+    """Raised inside the run thread when the user asks the program to stop."""
 
 
 class RunState(Enum):
@@ -29,6 +49,24 @@ class RunResult:
     error_message: Optional[str] = None
 
 
+class _CallbackStream:
+    """Minimal file-like object that forwards writes to a callback."""
+
+    def __init__(self, on_write: Callable[[str], None]):
+        self._on_write = on_write
+
+    def write(self, text: str) -> int:
+        if text:
+            self._on_write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+    def isatty(self) -> bool:
+        return False
+
+
 class Runner:
     """Compiles and runs QuinLang code with output capture."""
 
@@ -39,8 +77,8 @@ class Runner:
     ):
         self._on_output = on_output
         self._on_complete = on_complete
-        self._vm: Optional[QuinVM] = None
         self._thread: Optional[threading.Thread] = None
+        self._stop_requested = threading.Event()
         self._state = RunState.IDLE
 
     @property
@@ -59,6 +97,7 @@ class Runner:
         if self.is_running:
             return False
 
+        self._stop_requested.clear()
         self._state = RunState.RUNNING
         self._thread = threading.Thread(target=self._run_impl, args=(source_code,), daemon=True)
         self._thread.start()
@@ -66,8 +105,17 @@ class Runner:
 
     def stop(self):
         """Request the running program to stop."""
-        if self._vm and self.is_running:
-            self._vm.request_stop()
+        self._stop_requested.set()
+
+    def _trace(self, frame, event, arg):
+        """
+        Thread trace hook. Returning None means we're called for 'call' events
+        only, which the VM triggers constantly via its _pop/_local helpers -
+        frequent enough to stop promptly, far cheaper than tracing every line.
+        """
+        if self._stop_requested.is_set():
+            raise ExecutionStopped()
+        return None
 
     def _run_impl(self, source_code: str):
         """Internal method that runs in the worker thread."""
@@ -79,12 +127,27 @@ class Runner:
             codegen = CodeGenVM()
             code, functions, strings = codegen.generate(ast, ctx)
 
-            # Run
-            self._vm = QuinVM(code, functions, strings, output_callback=self._on_output)
-            exit_code = self._vm.run_main()
+            # Compiling can take a moment on a large file; honour a stop
+            # requested before execution even begins.
+            if self._stop_requested.is_set():
+                raise ExecutionStopped()
+
+            vm = QuinVM(code, functions, strings)
+            stream = _CallbackStream(self._on_output)
+
+            sys.settrace(self._trace)
+            try:
+                with contextlib.redirect_stdout(stream):
+                    exit_code = vm.run_main()
+            finally:
+                sys.settrace(None)
 
             self._state = RunState.FINISHED
             self._on_complete(RunResult(RunState.FINISHED, exit_code=exit_code))
+
+        except ExecutionStopped:
+            self._state = RunState.STOPPED
+            self._on_complete(RunResult(RunState.STOPPED))
 
         except ParseError as e:
             self._state = RunState.ERROR
@@ -100,9 +163,12 @@ class Runner:
                 error_message=f"Semantic error: {e}"
             ))
 
-        except ExecutionStopped:
-            self._state = RunState.STOPPED
-            self._on_complete(RunResult(RunState.STOPPED))
+        except VMError as e:
+            self._state = RunState.ERROR
+            self._on_complete(RunResult(
+                RunState.ERROR,
+                error_message=f"VM error: {e}"
+            ))
 
         except Exception as e:
             self._state = RunState.ERROR
@@ -110,6 +176,3 @@ class Runner:
                 RunState.ERROR,
                 error_message=f"Runtime error: {e}"
             ))
-
-        finally:
-            self._vm = None

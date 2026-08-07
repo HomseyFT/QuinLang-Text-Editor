@@ -4,25 +4,31 @@ Syntax highlighting for QuinLang code.
 from __future__ import annotations
 import re
 import tkinter as tk
-from typing import List, Tuple
+from bisect import bisect_right
+from typing import List
+
+from .theme import COLORS as THEME_COLORS
 
 
-# QuinLang syntax definitions
+# QuinLang syntax definitions.
+# These mirror compiler/tokens.py KEYWORDS and compiler/builtins.py get_builtins();
+# update them together when the language changes.
 KEYWORDS = {
     'fn', 'let', 'if', 'else', 'while', 'return', 'true', 'false',
+    'include', 'vm_asm',
 }
 
 TYPES = {
-    'int', 'bool', 'str', 'ptr', 'void',
+    'int', 'str', 'ptr', 'void', 'heapptr',
 }
 
 BUILTINS = {
-    'print', 'println', 'load16', 'store16', 'memcpy', 'memset',
+    'print', 'println',
+    'load16', 'store16', 'memcpy', 'memset',
     'array_push', 'array_pop',
+    'alloc', 'heap_load', 'heap_store',
+    'ct_eq', 'ct_select',
 }
-
-# Import colors from theme
-from .theme import COLORS as THEME_COLORS
 
 # Syntax highlighting colors (exported for finder preview)
 SYNTAX_COLORS = {
@@ -39,115 +45,96 @@ SYNTAX_COLORS = {
 COLORS = SYNTAX_COLORS
 
 
+def _word_pattern(words: set) -> str:
+    """Build an anchored alternation matching any of `words` as a whole word."""
+    return r'\b(?:' + '|'.join(sorted(words, key=len, reverse=True)) + r')\b'
+
+
+KEYWORD_RE = re.compile(_word_pattern(KEYWORDS))
+TYPE_RE = re.compile(_word_pattern(TYPES))
+BUILTIN_RE = re.compile(_word_pattern(BUILTINS))
+NUMBER_RE = re.compile(r'\b(?:0x[0-9a-fA-F]+|\d+)\b')
+
+# Comments and strings are matched in ONE pass so the leftmost token wins.
+# This keeps `// "quoted"` a comment and `"http://x"` a string, which separate
+# passes get wrong in one direction or the other.
+COMMENT_OR_STRING_RE = re.compile(
+    r'(?P<comment>//[^\n]*)'
+    r'|(?P<string>"[^"\\\n]*(?:\\.[^"\\\n]*)*")'
+)
+
+
 class SyntaxHighlighter:
     """Applies syntax highlighting to a Tkinter Text widget."""
-    
+
     def __init__(self, text_widget: tk.Text):
         self.text = text_widget
         self._setup_tags()
-    
+
     def _setup_tags(self):
         """Configure text tags for each syntax element."""
-        for name, color in COLORS.items():
+        for name, color in SYNTAX_COLORS.items():
             self.text.tag_configure(name, foreground=color)
-        
-        # Set tag priorities (higher = applied later = wins)
-        self.text.tag_raise('comment')  # Comments override everything
-        self.text.tag_raise('string')   # Strings override keywords inside them
-    
+
+        # Priority: later raises win. Strings and comments must outrank word
+        # tags so a keyword inside a string or comment is not recoloured.
+        for name in ('operator', 'number', 'builtin', 'type', 'keyword'):
+            self.text.tag_raise(name)
+        self.text.tag_raise('string')
+        self.text.tag_raise('comment')
+
     def highlight_all(self):
         """Highlight the entire text content."""
-        # Remove existing tags
-        for tag in COLORS.keys():
-            self.text.tag_remove(tag, "1.0", tk.END)
-        
         content = self.text.get("1.0", tk.END)
-        
-        # Apply highlighting
-        self._highlight_comments(content)
-        self._highlight_strings(content)
-        self._highlight_numbers(content)
-        self._highlight_keywords(content)
-        self._highlight_types(content)
-        self._highlight_builtins(content)
-    
-    def highlight_line(self, line_num: int):
-        """Highlight a single line."""
-        start = f"{line_num}.0"
-        end = f"{line_num}.end"
-        
-        # Remove existing tags on this line
-        for tag in COLORS.keys():
-            self.text.tag_remove(tag, start, end)
-        
-        line_content = self.text.get(start, end)
-        
-        # Apply highlighting to this line
-        self._highlight_comments(line_content, line_num)
-        self._highlight_strings(line_content, line_num)
-        self._highlight_numbers(line_content, line_num)
-        self._highlight_keywords(line_content, line_num)
-        self._highlight_types(line_content, line_num)
-        self._highlight_builtins(line_content, line_num)
-    
-    def _highlight_pattern(
-        self,
-        pattern: str,
-        tag: str,
-        content: str,
-        line_offset: int = 0
-    ):
-        """Apply a tag to all matches of a regex pattern."""
-        for match in re.finditer(pattern, content, re.MULTILINE):
-            start_idx = match.start()
-            end_idx = match.end()
-            
-            if line_offset:
-                # Single line mode
-                start = f"{line_offset}.{start_idx}"
-                end = f"{line_offset}.{end_idx}"
-            else:
-                # Full text mode - convert index to line.col
-                start = self._index_to_pos(content, start_idx)
-                end = self._index_to_pos(content, end_idx)
-            
-            self.text.tag_add(tag, start, end)
-    
-    def _index_to_pos(self, content: str, index: int) -> str:
-        """Convert a string index to Tkinter line.col position."""
-        lines = content[:index].split('\n')
-        line_num = len(lines)
-        col = len(lines[-1])
-        return f"{line_num}.{col}"
-    
-    def _highlight_comments(self, content: str, line_offset: int = 0):
-        """Highlight // comments."""
-        self._highlight_pattern(r'//.*$', 'comment', content, line_offset)
-    
-    def _highlight_strings(self, content: str, line_offset: int = 0):
-        """Highlight string literals."""
-        self._highlight_pattern(r'"[^"\\]*(?:\\.[^"\\]*)*"', 'string', content, line_offset)
-    
-    def _highlight_numbers(self, content: str, line_offset: int = 0):
-        """Highlight numeric literals."""
-        # Decimal and hex numbers
-        self._highlight_pattern(r'\b(?:0x[0-9a-fA-F]+|\d+)\b', 'number', content, line_offset)
-    
-    def _highlight_keywords(self, content: str, line_offset: int = 0):
-        """Highlight keywords."""
-        pattern = r'\b(' + '|'.join(KEYWORDS) + r')\b'
-        self._highlight_pattern(pattern, 'keyword', content, line_offset)
-    
-    def _highlight_types(self, content: str, line_offset: int = 0):
-        """Highlight type names."""
-        # Match types, including array types like int[3]
-        pattern = r'\b(' + '|'.join(TYPES) + r')(?:\[\d+\])?\b'
-        self._highlight_pattern(pattern, 'type', content, line_offset)
-    
-    def _highlight_builtins(self, content: str, line_offset: int = 0):
-        """Highlight builtin functions."""
-        pattern = r'\b(' + '|'.join(BUILTINS) + r')\b'
-        self._highlight_pattern(pattern, 'builtin', content, line_offset)
+
+        for tag in SYNTAX_COLORS:
+            self.text.tag_remove(tag, "1.0", tk.END)
+
+        # Offsets of each line start, so index->"line.col" is a binary search
+        # instead of re-splitting the prefix for every match.
+        line_starts = self._line_starts(content)
+
+        # Word-level tags first; strings/comments are layered on top and win by
+        # tag priority.
+        for regex, tag in (
+            (NUMBER_RE, 'number'),
+            (KEYWORD_RE, 'keyword'),
+            (TYPE_RE, 'type'),
+            (BUILTIN_RE, 'builtin'),
+        ):
+            self._apply(regex, tag, content, line_starts)
+
+        for match in COMMENT_OR_STRING_RE.finditer(content):
+            tag = 'comment' if match.lastgroup == 'comment' else 'string'
+            self.text.tag_add(
+                tag,
+                self._pos(line_starts, match.start()),
+                self._pos(line_starts, match.end()),
+            )
+
+    def _apply(self, regex, tag: str, content: str, line_starts: List[int]):
+        """Tag every match of `regex` in `content`."""
+        for match in regex.finditer(content):
+            self.text.tag_add(
+                tag,
+                self._pos(line_starts, match.start()),
+                self._pos(line_starts, match.end()),
+            )
+
+    @staticmethod
+    def _line_starts(content: str) -> List[int]:
+        """Character offset at which each line begins."""
+        starts = [0]
+        for i, char in enumerate(content):
+            if char == '\n':
+                starts.append(i + 1)
+        return starts
+
+    @staticmethod
+    def _pos(line_starts: List[int], index: int) -> str:
+        """Convert a string index to a Tkinter line.col position."""
+        line = bisect_right(line_starts, index) - 1
+        return f"{line + 1}.{index - line_starts[line]}"
 
 
 def highlight_text_widget(text_widget: tk.Text, content: str):
@@ -158,13 +145,13 @@ def highlight_text_widget(text_widget: tk.Text, content: str):
     text_widget.config(state=tk.NORMAL)
     text_widget.delete("1.0", tk.END)
     text_widget.insert("1.0", content)
-    
+
     highlighter = SyntaxHighlighter(text_widget)
     highlighter.highlight_all()
-    
+
     text_widget.config(state=tk.DISABLED)
 
 
 def get_highlighted_tags() -> dict:
     """Return the color configuration for external use."""
-    return COLORS.copy()
+    return SYNTAX_COLORS.copy()

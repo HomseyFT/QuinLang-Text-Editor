@@ -24,6 +24,9 @@ EXCLUDED_DIRS = {
 # Maximum files to scan
 MAX_FILES = 1000
 
+# Maximum rows rendered in the results list
+MAX_RESULTS = 100
+
 
 def fuzzy_match(query: str, text: str) -> Tuple[bool, int]:
     """
@@ -74,29 +77,31 @@ def fuzzy_match(query: str, text: str) -> Tuple[bool, int]:
     return False, 0
 
 
-def scan_files(root_dir: Path) -> List[Path]:
+def scan_files(root_dir: Path, _files: Optional[List[Path]] = None) -> List[Path]:
     """
     Recursively scan directory for files.
-    Returns list of file paths relative to root_dir.
+    Returns at most MAX_FILES paths.
     """
-    files = []
-    
+    # The accumulator is shared across recursion so MAX_FILES caps the whole
+    # walk. Checking a per-call list only capped each directory individually,
+    # letting a deep tree return far more than the limit.
+    files = [] if _files is None else _files
+
     try:
         for entry in os.scandir(root_dir):
             if len(files) >= MAX_FILES:
                 break
-            
+
             if entry.is_dir(follow_symlinks=False):
                 if entry.name not in EXCLUDED_DIRS and not entry.name.startswith('.'):
-                    files.extend(scan_files(Path(entry.path)))
+                    scan_files(Path(entry.path), files)
             elif entry.is_file():
                 path = Path(entry.path)
-                # Include all files or filter by extension
-                if not INCLUDED_EXTENSIONS or path.suffix.lower() in INCLUDED_EXTENSIONS:
+                if path.suffix.lower() in INCLUDED_EXTENSIONS:
                     files.append(path)
-    except PermissionError:
+    except (PermissionError, OSError):
         pass
-    
+
     return files
 
 
@@ -264,23 +269,41 @@ class FinderDialog(tk.Toplevel):
             # Sort by score (descending)
             matches.sort(key=lambda x: x[1], reverse=True)
             self._filtered_files = matches
-        
+
+        # Truncate the model, not just the view. Keeping more matches than we
+        # render let the arrow keys walk past the last visible row, leaving the
+        # listbox with no selection while Enter opened a file the user could
+        # not see.
+        total_matches = len(self._filtered_files)
+        self._filtered_files = self._filtered_files[:MAX_RESULTS]
+
         # Update listbox
         self._file_listbox.delete(0, tk.END)
-        for file_path, _ in self._filtered_files[:100]:  # Limit display
+        for file_path, _ in self._filtered_files:
             # Show relative path
             try:
                 rel_path = file_path.relative_to(self._root_dir)
             except ValueError:
                 rel_path = file_path
             self._file_listbox.insert(tk.END, str(rel_path))
-        
+
         # Select first item
+        self._file_listbox.selection_clear(0, tk.END)
         if self._filtered_files:
             self._selected_index = 0
             self._file_listbox.selection_set(0)
             self._file_listbox.see(0)
-            self._update_preview()
+        else:
+            self._selected_index = 0
+        self._update_preview()
+
+        if total_matches > len(self._filtered_files):
+            self._status_var.set(
+                f"Showing {len(self._filtered_files)} of {total_matches} matches "
+                f"- refine your search"
+            )
+        else:
+            self._status_var.set(f"{total_matches} match(es)")
     
     def _on_search_change(self, *args):
         """Handle search text change."""

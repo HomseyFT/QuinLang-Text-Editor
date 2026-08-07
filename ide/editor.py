@@ -5,6 +5,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
+from .highlighter import SyntaxHighlighter
 from .theme import COLORS, FONTS
 
 
@@ -43,7 +44,10 @@ class LineNumbers(tk.Canvas):
 
 
 class CodeEditor(ttk.Frame):
-    """Text editor with line numbers for QuinLang code."""
+    """Text editor with line numbers and syntax highlighting for QuinLang code."""
+
+    # Idle delay before re-colouring, so held keys don't rescan on every repeat.
+    HIGHLIGHT_DELAY_MS = 120
 
     def __init__(self, parent: tk.Widget, **kwargs):
         super().__init__(parent, **kwargs)
@@ -66,6 +70,11 @@ class CodeEditor(ttk.Frame):
             padx=5,
             pady=5,
         )
+
+        # Syntax highlighting for the live buffer. Same SyntaxHighlighter the
+        # finder uses for its preview pane, attached to an editable widget.
+        self.highlighter = SyntaxHighlighter(self.text)
+        self._highlight_job: str | None = None
 
         # Create line numbers
         self.line_numbers = LineNumbers(self, self.text, bg=COLORS['bg_medium'])
@@ -90,9 +99,13 @@ class CodeEditor(ttk.Frame):
         self.text.bind("<KeyRelease>", self._on_change)
         self.text.bind("<MouseWheel>", self._on_change)
         self.text.bind("<Configure>", self._on_change)
+        # Menu/middle-click paste and undo don't emit KeyRelease.
+        for virtual in ("<<Paste>>", "<<Undo>>", "<<Redo>>"):
+            self.text.bind(virtual, lambda e: self.after_idle(self._on_change))
 
         # Initial line number draw
         self.after(10, self.line_numbers.redraw)
+        self.after(10, self._run_highlight)
 
     def _on_vscroll(self, *args):
         """Handle vertical scrollbar movement."""
@@ -107,6 +120,18 @@ class CodeEditor(ttk.Frame):
     def _on_change(self, event=None):
         """Handle text changes."""
         self.line_numbers.redraw()
+        self.schedule_highlight()
+
+    def schedule_highlight(self):
+        """Re-colour the buffer once typing pauses."""
+        if self._highlight_job is not None:
+            self.after_cancel(self._highlight_job)
+        self._highlight_job = self.after(self.HIGHLIGHT_DELAY_MS, self._run_highlight)
+
+    def _run_highlight(self):
+        """Apply syntax highlighting to the whole buffer."""
+        self._highlight_job = None
+        self.highlighter.highlight_all()
 
     def get_code(self) -> str:
         """Get the current code from the editor."""
@@ -116,9 +141,16 @@ class CodeEditor(ttk.Frame):
         """Set the code in the editor."""
         self.text.delete("1.0", tk.END)
         self.text.insert("1.0", code)
+        # Each buffer gets a fresh undo stack; otherwise Ctrl+Z in a newly
+        # shown tab replays edits belonging to the tab it replaced.
+        self.text.edit_reset()
+        self.text.edit_modified(False)
         self.line_numbers.redraw()
+        self._run_highlight()
 
     def clear(self):
         """Clear the editor."""
         self.text.delete("1.0", tk.END)
+        self.text.edit_reset()
         self.line_numbers.redraw()
+        self._run_highlight()
