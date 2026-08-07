@@ -191,21 +191,53 @@ fn main(): int {
         assert "hello" in "".join(output), \
             f"Expected 'hello' in output, got {output!r}"
 
-    def test_stdout_is_restored_after_a_run(self):
-        """Redirecting stdout must not leak past the run."""
-        from ide.runner import Runner, RunResult
+    def test_process_stdout_is_never_touched(self):
+        """
+        Output capture must be scoped to runtime.vm, not process-wide.
+
+        Anything else printing during a run (or another thread) must be
+        unaffected.
+        """
+        from ide.runner import Runner
 
         before = sys.stdout
         done = threading.Event()
-        runner = Runner(
-            on_output=lambda s: None,
-            on_complete=lambda r: done.set(),
-        )
+        runner = Runner(on_output=lambda s: None, on_complete=lambda r: done.set())
         runner.run(self.HELLO_SRC)
         done.wait(timeout=5.0)
         time.sleep(0.05)
 
-        assert sys.stdout is before, "stdout was not restored after the run"
+        assert sys.stdout is before, "process stdout was replaced"
+
+    def test_injected_print_is_cleaned_up(self):
+        """The shadowing print() must not outlive the run."""
+        import runtime.vm as vm
+        from ide.runner import Runner
+
+        assert "print" not in vm.__dict__, "runtime.vm had a leaked print before the run"
+
+        done = threading.Event()
+        runner = Runner(on_output=lambda s: None, on_complete=lambda r: done.set())
+        runner.run(self.HELLO_SRC)
+        done.wait(timeout=5.0)
+        time.sleep(0.05)
+
+        assert "print" not in vm.__dict__, \
+            "runtime.vm.print leaked after the run; VM output would stay hijacked"
+
+    def test_vm_still_emits_via_print(self):
+        """
+        Guard the coupling the capture relies on.
+
+        The IDE intercepts output by shadowing print() inside runtime.vm. If a
+        sync changes the VM to write to sys.stdout directly, output would be
+        silently lost - fail here instead, loudly.
+        """
+        source = (PROJECT_ROOT / "runtime" / "vm.py").read_text(encoding="utf-8")
+        assert "print(" in source, (
+            "runtime/vm.py no longer calls print(); update the capture "
+            "mechanism in ide/runner.py::_capture_vm_output"
+        )
 
     def test_runner_reports_syntax_errors(self):
         from ide.runner import Runner, RunResult, RunState
