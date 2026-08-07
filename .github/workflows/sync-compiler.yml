@@ -1,15 +1,15 @@
 name: Sync Compiler from QuinLang
 
+# Pulls the latest compiler/runtime/examples from the QuinLang repo, bumps the
+# patch version, and tags it.
+#
+# It deliberately does NOT create a GitHub release. Releases are cut by hand,
+# from the Releases page, whenever a version is worth shipping - publishing one
+# fires .github/workflows/release.yml, which builds and attaches both binaries.
 on:
   repository_dispatch:
     types: [compiler-updated]
   workflow_dispatch:
-    inputs:
-      auto_release:
-        description: 'Create a release after sync'
-        required: false
-        default: 'false'
-        type: boolean
 
 jobs:
   sync:
@@ -18,7 +18,7 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout QuinLang-IDE
+      - name: Checkout QuinLang-Text-Editor
         uses: actions/checkout@v4
         with:
           path: ide
@@ -33,12 +33,12 @@ jobs:
         run: |
           # Remove old directories
           rm -rf ide/compiler ide/runtime ide/examples
-          
+
           # Copy fresh from QuinLang
           cp -r lang/compiler ide/compiler
           cp -r lang/runtime ide/runtime
           cp -r lang/examples ide/examples
-          
+
           # Remove any __pycache__ directories
           find ide/compiler ide/runtime -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
@@ -62,36 +62,65 @@ jobs:
           git commit -m "Sync compiler/runtime from QuinLang
 
           Source commit: ${{ github.event.client_payload.sha || 'manual sync' }}"
-          
+
           git push
 
-      - name: Get current version
+      - name: Compute next version
         if: steps.changes.outputs.has_changes == 'true'
         id: version
         run: |
           cd ide
-          # Extract version from updater.py
-          VERSION=$(grep -oP 'CURRENT_VERSION\s*=\s*"\K[^"]+' ide/updater.py || echo "0.1.0")
-          
-          # Parse and increment patch version
-          IFS='.' read -r major minor patch <<< "$VERSION"
-          NEW_PATCH=$((patch + 1))
-          NEW_VERSION="${major}.${minor}.${NEW_PATCH}"
-          
-          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          VERSION=$(grep -oP 'CURRENT_VERSION\s*=\s*"\K[^"]+' ide/updater.py || echo "")
 
-      - name: Update version in updater.py
-        if: steps.changes.outputs.has_changes == 'true' && (github.event.inputs.auto_release == 'true' || github.event_name == 'repository_dispatch')
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not read CURRENT_VERSION from ide/updater.py"
+            exit 1
+          fi
+
+          # Default the minor/patch fields so a two-part version like "1.06"
+          # can't produce a malformed bump (the old logic emitted "1.06.1").
+          IFS='.' read -r major minor patch <<< "$VERSION"
+          major=${major:-0}
+          minor=${minor:-0}
+          patch=${patch:-0}
+
+          if ! [[ "$major$minor$patch" =~ ^[0-9]+$ ]]; then
+            echo "::error::CURRENT_VERSION '$VERSION' is not numeric dotted form"
+            exit 1
+          fi
+
+          NEW_VERSION="${major}.${minor}.$((patch + 1))"
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Bumping $VERSION -> $NEW_VERSION"
+
+      - name: Bump version and tag
+        if: steps.changes.outputs.has_changes == 'true'
         run: |
           cd ide
-          sed -i "s/CURRENT_VERSION = \"[^\"]*\"/CURRENT_VERSION = \"${{ steps.version.outputs.version }}\"/" ide/updater.py
+          NEW_VERSION="${{ steps.version.outputs.version }}"
+
+          sed -i "s/CURRENT_VERSION = \"[^\"]*\"/CURRENT_VERSION = \"${NEW_VERSION}\"/" ide/updater.py
           git add ide/updater.py
-          git commit -m "Bump version to ${{ steps.version.outputs.version }}"
+          git commit -m "Bump version to ${NEW_VERSION}"
           git push
 
-      - name: Create release tag
-        if: steps.changes.outputs.has_changes == 'true' && (github.event.inputs.auto_release == 'true' || github.event_name == 'repository_dispatch')
+          git tag "v${NEW_VERSION}"
+          git push origin "v${NEW_VERSION}"
+
+      - name: Summary
+        if: steps.changes.outputs.has_changes == 'true'
         run: |
-          cd ide
-          git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
+          NEW_VERSION="${{ steps.version.outputs.version }}"
+          {
+            echo "### Compiler synced - tagged \`v${NEW_VERSION}\`"
+            echo ""
+            echo "No release was created. To ship this version:"
+            echo ""
+            echo "1. Go to **Releases > Draft a new release**"
+            echo "2. Choose the existing tag \`v${NEW_VERSION}\`"
+            echo "3. **Publish release**"
+            echo ""
+            echo "Publishing triggers \`Build and Release\`, which builds and attaches"
+            echo "\`QuinLangIDE-windows-x64.exe\` and \`QuinLangIDE-linux-x64\`,"
+            echo "and fails loudly if either is missing."
+          } >> "$GITHUB_STEP_SUMMARY"
