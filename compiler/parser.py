@@ -345,6 +345,9 @@ class Parser:
         if self._match(TokenType.TRUE):
             tok = self._previous()
             return A.Literal(True, line=tok.line, col=tok.col)
+        if self._match(TokenType.NULL):
+            tok = self._previous()
+            return A.Literal(None, line=tok.line, col=tok.col)
         if self._match(TokenType.NUMBER):
             tok = self._previous()
             return A.Literal(tok.literal, line=tok.line, col=tok.col)

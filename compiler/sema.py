@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 from . import ast as A
 from .compiler_types import (
-    Type, Int, Str, Void, Bool, Ptr, type_from_name, is_array_type, UnknownTypeError,
+    Type, Int, Str, Void, Bool, Ptr, HeapPtr, type_from_name, is_array_type, array_length, UnknownTypeError,
 )
 from .builtins import get_builtins
 
@@ -298,8 +298,33 @@ class SemanticAnalyzer:
         # All other statements (VarDecl, Assign, ExprStmt, Print, PrintLn, etc.) do not guarantee return
         return False
 
+    def _validate_index(self, arr_t: Type, idx_expr: A.Expr, scope: Scope, not_array_msg: str, line: int, col: int):
+        """Validate an array index expression.
+
+        Requires arr_t to be an int[N] array, idx_expr to type as Int,
+        and rejects a literal int index (excluding bool) that is negative
+        or >= array_length.
+        """
+        if not is_array_type(arr_t):
+            raise SemanticError(not_array_msg, line, col)
+        idx_t = self._analyze_expr(idx_expr, scope)
+        if idx_t != Int:
+            raise SemanticError("Array index must be int", line, col)
+        if isinstance(idx_expr, A.Literal) and isinstance(idx_expr.value, int) and not isinstance(idx_expr.value, bool):
+            length = array_length(arr_t)
+            if length is not None:
+                idx_val = idx_expr.value
+                if idx_val < 0 or idx_val >= length:
+                    raise SemanticError(
+                        f"Array index {idx_val} out of bounds for length {length}",
+                        line, col,
+                    )
+
     def _analyze_expr(self, e: A.Expr, scope: Scope) -> Type:
         if isinstance(e, A.Literal):
+            if e.value is None:
+                self.ctx.set_type(e, HeapPtr)
+                return HeapPtr
             if isinstance(e.value, bool):
                 self.ctx.set_type(e, Bool)
                 return Bool
@@ -334,6 +359,19 @@ class SemanticAnalyzer:
             lt = self._analyze_expr(e.left, scope)
             rt = self._analyze_expr(e.right, scope)
             if e.op in ('+', '-', '*', '/'):
+                # Heap pointer arithmetic: allow heapptr +/- int, and heapptr - heapptr.
+                if e.op == '+':
+                    if (lt == HeapPtr and rt == Int) or (lt == Int and rt == HeapPtr):
+                        self.ctx.set_type(e, HeapPtr)
+                        return HeapPtr
+                elif e.op == '-':
+                    if lt == HeapPtr and rt == Int:
+                        self.ctx.set_type(e, HeapPtr)
+                        return HeapPtr
+                    if lt == HeapPtr and rt == HeapPtr:
+                        self.ctx.set_type(e, Int)
+                        return Int
+                # Fall through to existing int-only rule for all other combos.
                 if lt == Int and rt == Int:
                     self.ctx.set_type(e, Int)
                     return Int
@@ -381,11 +419,7 @@ class SemanticAnalyzer:
             raise SemanticError(f"Unknown operator {e.op}", e.line, e.col)
         if isinstance(e, A.Index):
             arr_t = self._analyze_expr(e.array, scope)
-            if not is_array_type(arr_t):
-                raise SemanticError("Indexing requires int[N] array", e.line, e.col)
-            idx_t = self._analyze_expr(e.index, scope)
-            if idx_t != Int:
-                raise SemanticError("Array index must be int", e.line, e.col)
+            self._validate_index(arr_t, e.index, scope, "Indexing requires int[N] array", e.line, e.col)
             self.ctx.set_type(e, Int)
             return Int
         if isinstance(e, A.AddressOf):
@@ -398,11 +432,7 @@ class SemanticAnalyzer:
                 return Ptr
             if isinstance(e.target, A.Index):
                 arr_t = self._analyze_expr(e.target.array, scope)
-                if not is_array_type(arr_t):
-                    raise SemanticError("Can only take address of int[N] array elements", e.target.line, e.target.col)
-                idx_t = self._analyze_expr(e.target.index, scope)
-                if idx_t != Int:
-                    raise SemanticError("Array index must be int", e.target.line, e.target.col)
+                self._validate_index(arr_t, e.target.index, scope, "Can only take address of int[N] array elements", e.target.line, e.target.col)
                 self.ctx.set_type(e, Ptr)
                 return Ptr
             raise SemanticError("Can only take address of variables or array elements", e.line, e.col)

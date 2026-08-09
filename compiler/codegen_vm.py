@@ -196,6 +196,7 @@ class CodeGenVM:
                 # STORE_LOCAL_IDX pops the index, then the value.
                 self._emit_expr(st.value, layout, ctx)
                 self._emit_expr(st.target.index, layout, ctx)
+                self.code.append(Instruction(OpCode.BOUNDS_CHECK, slot.length))
                 self.code.append(Instruction(OpCode.STORE_LOCAL_IDX, slot.index))
             else:
                 raise CodegenError(f"[{st.line}:{st.col}] Invalid assignment target")
@@ -364,7 +365,9 @@ class CodeGenVM:
 
     def _emit_expr(self, e: A.Expr, layout: FunctionLayout, ctx: Context):
         if isinstance(e, A.Literal):
-            if isinstance(e.value, bool):
+            if e.value is None:
+                self.code.append(Instruction(OpCode.PUSH_INT, 0))
+            elif isinstance(e.value, bool):
                 self.code.append(Instruction(OpCode.PUSH_INT, 1 if e.value else 0))
             elif isinstance(e.value, int):
                 self.code.append(Instruction(OpCode.PUSH_INT, e.value & 0xFFFF))
@@ -390,6 +393,7 @@ class CodeGenVM:
                 slot = self._array_slot(e.target.array, layout, ctx)
                 # pointer = base + index
                 self._emit_expr(e.target.index, layout, ctx)
+                self.code.append(Instruction(OpCode.BOUNDS_CHECK, slot.length))
                 self.code.append(Instruction(OpCode.PUSH_INT, slot.index))
                 self.code.append(Instruction(OpCode.ADD))
             else:
@@ -411,6 +415,7 @@ class CodeGenVM:
         elif isinstance(e, A.Index):
             slot = self._array_slot(e.array, layout, ctx)
             self._emit_expr(e.index, layout, ctx)
+            self.code.append(Instruction(OpCode.BOUNDS_CHECK, slot.length))
             self.code.append(Instruction(OpCode.LOAD_LOCAL_IDX, slot.index))
         elif isinstance(e, A.Call):
             self._emit_call(e, layout, ctx)

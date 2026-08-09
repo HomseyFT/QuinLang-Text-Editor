@@ -53,6 +53,7 @@ class TokenType(Enum):
     WHILE = auto()
     TRUE = auto()
     FALSE = auto()
+    NULL = auto()
     INT = auto()
     STR = auto()
     VOID = auto()
@@ -74,6 +75,7 @@ KEYWORDS = {
     "while": TokenType.WHILE,
     "true": TokenType.TRUE,
     "false": TokenType.FALSE,
+    "null": TokenType.NULL,
     "int": TokenType.INT,
     "str": TokenType.STR,
     "void": TokenType.VOID,

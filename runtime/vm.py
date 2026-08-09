@@ -6,6 +6,7 @@ from compiler.bytecode import OpCode, Instruction, Bytecode
 WORD_MASK = 0xFFFF
 SIGN_BIT = 0x8000
 HEAP_SIZE = 64 * 1024
+NULL_ADDR = 0
 
 
 class VMError(RuntimeError):
@@ -70,7 +71,9 @@ class QuinVM:
         self.locals: List[int] = []         # current frame locals
         self.frame_base: int = 0            # stack height when current frame started
         self.heap: bytearray = bytearray(HEAP_SIZE)
-        self.heap_ptr: int = 0
+        # Address 0 is reserved for null; the bump allocator starts at 2 so
+        # that a real allocation can never be at address 0.
+        self.heap_ptr: int = NULL_ADDR + 2
 
     def run_main(self) -> int:
         if "main" not in self.func_index:
@@ -275,6 +278,18 @@ class QuinVM:
                 self.pc = frame.return_pc
                 self.stack.append(ret_val)
 
+            elif op is OpCode.BOUNDS_CHECK:
+                # Inspect the index on top of the stack without popping it.
+                if len(self.stack) <= self.frame_base:
+                    raise VMError(f"Operand stack underflow on BOUNDS_CHECK at pc={self.pc - 1}")
+                idx = to_signed(self.stack[-1])
+                length = int(arg)
+                if idx < 0 or idx >= length:
+                    raise VMError(
+                        f"Array index out of bounds at pc={self.pc - 1}: "
+                        f"index={idx}, length={length}"
+                    )
+
             elif op is OpCode.LOAD_LOCAL_IDX:
                 idx = to_signed(self._pop())
                 self.stack.append(self._local(int(arg) + idx))
@@ -344,6 +359,8 @@ class QuinVM:
 
             elif op is OpCode.HEAP_LOAD:
                 addr = to_signed(self._pop())
+                if addr == NULL_ADDR:
+                    raise VMError("Null pointer dereference in HEAP_LOAD")
                 self._check_heap_word(addr, "HEAP_LOAD")
                 # little-endian word
                 self.stack.append((self.heap[addr + 1] << 8) | self.heap[addr])
@@ -351,6 +368,8 @@ class QuinVM:
             elif op is OpCode.HEAP_STORE:
                 value = self._pop()
                 addr = to_signed(self._pop())
+                if addr == NULL_ADDR:
+                    raise VMError("Null pointer dereference in HEAP_STORE")
                 self._check_heap_word(addr, "HEAP_STORE")
                 self.heap[addr] = value & 0xFF
                 self.heap[addr + 1] = (value >> 8) & 0xFF

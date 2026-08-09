@@ -47,6 +47,7 @@ class OpCode(Enum):
     # Arrays as locals: base index is encoded in operand
     LOAD_LOCAL_IDX = auto()    # operand: base local index
     STORE_LOCAL_IDX = auto()   # operand: base local index
+    BOUNDS_CHECK = auto()      # operand: array element count; inspects index on top of stack without popping it
 
     # Indirect access using "pointer" as local index
     LOAD_INDIRECT = auto()     # pop p; push locals[p]
