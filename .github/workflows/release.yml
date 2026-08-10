@@ -150,16 +150,31 @@ jobs:
       - name: Confirm assets published
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job never checks out the repo, so gh has no git remote to infer
+          # the repository from and would fail with "not a git repository".
+          GH_REPO: ${{ github.repository }}
         run: |
           TAG="${{ needs.setup.outputs.tag }}"
-          ASSETS=$(gh release view "$TAG" --json assets -q '.assets[].name')
-          echo "Assets on $TAG:"
-          echo "$ASSETS"
 
-          for f in QuinLangIDE-windows-x64.exe QuinLangIDE-linux-x64; do
-            echo "$ASSETS" | grep -qx "$f" || {
-              echo "::error::Asset $f is not attached to release $TAG"
-              exit 1
-            }
+          # Asset listing can lag a moment behind the upload, so retry briefly
+          # rather than failing a release that is actually fine.
+          for attempt in 1 2 3 4 5; do
+            ASSETS=$(gh release view "$TAG" --json assets -q '.assets[].name' || echo "")
+            echo "Attempt $attempt - assets on $TAG:"
+            echo "$ASSETS"
+
+            MISSING=0
+            for f in QuinLangIDE-windows-x64.exe QuinLangIDE-linux-x64; do
+              echo "$ASSETS" | grep -qx "$f" || MISSING=1
+            done
+
+            if [ "$MISSING" -eq 0 ]; then
+              echo "Both binaries confirmed on $TAG."
+              exit 0
+            fi
+
+            sleep 5
           done
-          echo "Both binaries confirmed on $TAG."
+
+          echo "::error::Release $TAG is missing one or both binaries."
+          exit 1
