@@ -28,4 +28,8 @@ def get_builtins() -> Dict[str, BuiltinSig]:
         "alloc":      (["int"], "heapptr"),
         "heap_load":  (["heapptr"], "int"),
         "heap_store": (["heapptr", "int"], "void"),
+        # Force a collection. Collection also happens on its own when an
+        # allocation cannot be satisfied; this exists so a program (or a test)
+        # can ask for one at a known point.
+        "gc":         ([], "void"),
     }

@@ -551,6 +551,17 @@ class SemanticAnalyzer:
                 sym = scope.resolve(e.target.name)
                 if sym is None:
                     raise SemanticError(f"Undeclared variable '{e.target.name}'", e.target.line, e.target.col)
+                # A frame pointer to a reference slot would let load16 read the
+                # address out as an int and store16 put one back, which is the
+                # last way to hide a reference from the collector or to keep a
+                # stale one. Address-of stays available for ints and arrays.
+                if is_reference_type(sym.type):
+                    raise SemanticError(
+                        f"Cannot take the address of '{e.target.name}': it holds a "
+                        f"{sym.type} reference, and a reference cannot be converted "
+                        f"to an int",
+                        e.target.line, e.target.col,
+                    )
                 self.ctx.bind(e.target, sym)
                 self.ctx.set_type(e, Ptr)
                 return Ptr

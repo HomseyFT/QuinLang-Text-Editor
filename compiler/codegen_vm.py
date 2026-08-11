@@ -701,6 +701,10 @@ class CodeGenVM:
             self._emit_expr(e.args[0], layout, ctx)
             self.code.append(Instruction(OpCode.HEAP_LOAD))
             return
+        if name == "gc" and not e.args:
+            self.code.append(Instruction(OpCode.GC))
+            self.code.append(Instruction(OpCode.PUSH_INT, 0))  # void result
+            return
         if name == "heap_store" and len(e.args) == 2:
             self._emit_expr(e.args[0], layout, ctx)   # addr
             self._emit_expr(e.args[1], layout, ctx)   # value

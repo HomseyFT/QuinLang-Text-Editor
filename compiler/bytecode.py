@@ -76,6 +76,7 @@ class OpCode(Enum):
     # turn a null base into a small non-zero address and read whatever is there.
     HEAP_LOAD_FIELD = auto()   # operand: word offset; pop ref, push field
     HEAP_STORE_FIELD = auto()  # operand: word offset; pop value, pop ref
+    GC = auto()                # force a collection
 
 
 Operand = Union[int, None]
