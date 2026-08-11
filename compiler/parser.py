@@ -131,6 +131,33 @@ class Parser:
         self._consume(TokenType.SEMICOLON, "Expected ';' after variable declaration")
         return A.VarDecl(name_tok.lexeme, type_name, init, line=name_tok.line, col=name_tok.col)
 
+    def _assign_or_expr(self) -> A.Stmt:
+        """Parse `expr` or `expr = value`, leaving the terminator to the caller.
+
+        A for-loop's init clause ends at ';' and its step clause at ')', so
+        unlike a statement they cannot assume which token terminates them.
+        """
+        expr = self._expression()
+        if self._match(TokenType.EQUAL):
+            eq_tok = self._previous()
+            value = self._expression()
+            return A.Assign(expr, value, line=eq_tok.line, col=eq_tok.col)
+        return A.ExprStmt(expr, line=expr.line, col=expr.col)
+
+    def _for_init(self) -> Optional[A.Stmt]:
+        if self._match(TokenType.SEMICOLON):
+            return None
+        if self._match(TokenType.LET):
+            return self._var_decl()  # consumes its own ';'
+        stmt = self._assign_or_expr()
+        self._consume(TokenType.SEMICOLON, "Expected ';' after for-loop initializer")
+        return stmt
+
+    def _for_step(self) -> Optional[A.Stmt]:
+        if self._check(TokenType.RIGHT_PAREN):
+            return None
+        return self._assign_or_expr()
+
     def _statement(self) -> A.Stmt:
         if self._match(TokenType.PRINT):
             tok = self._previous()
@@ -173,6 +200,30 @@ class Parser:
             self._consume(TokenType.RIGHT_PAREN, "Expected ')' after condition")
             body = self._block()
             return A.While(cond, body, line=tok.line, col=tok.col)
+        if self._match(TokenType.FOR):
+            tok = self._previous()
+            self._consume(TokenType.LEFT_PAREN, "Expected '(' after 'for'")
+            init = self._for_init()
+            cond: Optional[A.Expr] = None
+            if not self._check(TokenType.SEMICOLON):
+                cond = self._expression()
+            self._consume(TokenType.SEMICOLON, "Expected ';' after for-loop condition")
+            step = self._for_step()
+            self._consume(TokenType.RIGHT_PAREN, "Expected ')' after for-loop clauses")
+            body = self._block()
+            return A.For(init, cond, step, body, line=tok.line, col=tok.col)
+        if self._match(TokenType.BREAK):
+            tok = self._previous()
+            self._consume(TokenType.SEMICOLON, "Expected ';' after 'break'")
+            return A.Break(line=tok.line, col=tok.col)
+        if self._match(TokenType.CONTINUE):
+            tok = self._previous()
+            self._consume(TokenType.SEMICOLON, "Expected ';' after 'continue'")
+            return A.Continue(line=tok.line, col=tok.col)
+        if self._check(TokenType.LEFT_BRACE):
+            # A bare block, which exists only to introduce a scope.
+            tok = self._peek()
+            return A.Block(self._block(), line=tok.line, col=tok.col)
         # General expression / assignment form: `expr` or `expr = value`.
         expr = self._expression()
         if self._match(TokenType.EQUAL):

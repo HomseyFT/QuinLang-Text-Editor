@@ -96,6 +96,22 @@ class While(Stmt):
     body: List[Stmt]
 
 @dataclass
+class For(Stmt):
+    # Any of init/cond/step may be omitted; an omitted cond loops forever.
+    init: Optional[Stmt]
+    cond: Optional[Expr]
+    step: Optional[Stmt]
+    body: List[Stmt]
+
+@dataclass
+class Break(Stmt):
+    pass
+
+@dataclass
+class Continue(Stmt):
+    pass
+
+@dataclass
 class Block(Stmt):
     stmts: List[Stmt] = field(default_factory=list)
 

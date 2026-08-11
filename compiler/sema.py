@@ -103,6 +103,10 @@ class SemanticAnalyzer:
         # Symbols declared by the function currently being analyzed, in the
         # order they will occupy frame slots.
         self._frame: List[Symbol] = []
+        # How many loops enclose the statement being analyzed, so that a
+        # 'break' or 'continue' with nothing to jump to is rejected here
+        # rather than becoming a dangling jump in codegen.
+        self._loop_depth = 0
 
     def _resolve_type(self, name: str, line: int, col: int) -> Type:
         """Map a source-level type name onto a concrete Type, with location on failure."""
@@ -164,6 +168,7 @@ class SemanticAnalyzer:
         sig = self.ctx.functions[fn.name]
         scope = Scope()
         self._frame = []
+        self._loop_depth = 0
         for p, t in zip(fn.params, sig.params):
             sym = scope.define(Symbol(p.name, t), p.line, p.col)
             self.ctx.bind(p, sym)
@@ -260,8 +265,37 @@ class SemanticAnalyzer:
             if cond_t != Bool:
                 raise SemanticError("While condition must be bool", st.line, st.col)
             body_scope = Scope(scope)
+            self._loop_depth += 1
             for s in st.body:
                 self._analyze_stmt(s, body_scope, ret_type)
+            self._loop_depth -= 1
+        elif isinstance(st, A.For):
+            # The init clause declares into a scope wrapping the loop, so the
+            # loop variable is visible to cond/step/body and nowhere else.
+            loop_scope = Scope(scope)
+            if st.init is not None:
+                self._analyze_stmt(st.init, loop_scope, ret_type)
+            if st.cond is not None:
+                cond_t = self._analyze_expr(st.cond, loop_scope)
+                if cond_t != Bool:
+                    raise SemanticError("For condition must be bool", st.line, st.col)
+            if st.step is not None:
+                self._analyze_stmt(st.step, loop_scope, ret_type)
+            body_scope = Scope(loop_scope)
+            self._loop_depth += 1
+            for s in st.body:
+                self._analyze_stmt(s, body_scope, ret_type)
+            self._loop_depth -= 1
+        elif isinstance(st, A.Block):
+            block_scope = Scope(scope)
+            for s in st.stmts:
+                self._analyze_stmt(s, block_scope, ret_type)
+        elif isinstance(st, A.Break):
+            if self._loop_depth == 0:
+                raise SemanticError("'break' outside of a loop", st.line, st.col)
+        elif isinstance(st, A.Continue):
+            if self._loop_depth == 0:
+                raise SemanticError("'continue' outside of a loop", st.line, st.col)
         elif isinstance(st, A.ExprStmt):
             self._analyze_expr(st.expr, scope)
         elif isinstance(st, A.VmAsm):
@@ -292,10 +326,13 @@ class SemanticAnalyzer:
             else:
                 # No else branch: not guaranteed
                 return False
-        if isinstance(st, A.While):
-            # While loop may not execute, so never guaranteed
+        if isinstance(st, (A.While, A.For)):
+            # A loop body may not run, so it never guarantees a return. An
+            # unconditional loop that only exits by 'return' is rejected too;
+            # the check is deliberately conservative.
             return False
-        # All other statements (VarDecl, Assign, ExprStmt, Print, PrintLn, etc.) do not guarantee return
+        # All other statements (VarDecl, Assign, ExprStmt, Print, PrintLn,
+        # Break, Continue, etc.) do not guarantee return
         return False
 
     def _validate_index(self, arr_t: Type, idx_expr: A.Expr, scope: Scope, not_array_msg: str, line: int, col: int):

@@ -32,6 +32,18 @@ class LocalSlot:
 
 
 @dataclass
+class LoopContext:
+    """The jump sites inside one loop that only its end knows how to patch.
+
+    `break` and `continue` are emitted before their targets exist, so each one
+    records the index of its JMP here and the enclosing loop fills in the
+    address once it has finished emitting.
+    """
+    break_sites: List[int] = field(default_factory=list)
+    continue_sites: List[int] = field(default_factory=list)
+
+
+@dataclass
 class FunctionLayout:
     name: str
     num_locals: int
@@ -59,6 +71,8 @@ class CodeGenVM:
         self._string_ids: Dict[str, int] = {}
         # map function name -> index used in CALL opcode
         self.func_name_to_index: Dict[str, int] = {}
+        # Enclosing loops, innermost last: break/continue bind to the last one.
+        self._loops: List[LoopContext] = []
 
     # -- string table ----------------------------------------------------
 
@@ -236,6 +250,18 @@ class CodeGenVM:
             self._emit_if(st, layout, ctx)
         elif isinstance(st, A.While):
             self._emit_while(st, layout, ctx)
+        elif isinstance(st, A.For):
+            self._emit_for(st, layout, ctx)
+        elif isinstance(st, A.Block):
+            # A block is only a scope, and scoping is already settled: sema gave
+            # its declarations their own symbols, so there is nothing to emit
+            # beyond the statements themselves.
+            for s in st.stmts:
+                self._emit_stmt(s, layout, ctx)
+        elif isinstance(st, A.Break):
+            self._emit_loop_jump(st, "break")
+        elif isinstance(st, A.Continue):
+            self._emit_loop_jump(st, "continue")
         elif isinstance(st, A.VmAsm):
             self._emit_vm_asm(st, layout, ctx)
         else:
@@ -259,15 +285,63 @@ class CodeGenVM:
                 self._emit_stmt(s, layout, ctx)
         self.code[jmp_index].arg = len(self.code)
 
+    def _emit_loop_jump(self, st: A.Stmt, kind: str):
+        """Emit the JMP for a break or continue, to be patched by its loop."""
+        if not self._loops:
+            # Sema rejects this already; reaching it means the two passes
+            # disagree about what encloses this statement.
+            raise CodegenError(f"[{st.line}:{st.col}] '{kind}' outside of a loop")
+        sites = self._loops[-1].break_sites if kind == "break" else self._loops[-1].continue_sites
+        sites.append(len(self.code))
+        self.code.append(Instruction(OpCode.JMP, 0))  # arg to be patched
+
+    def _patch_loop(self, loop: LoopContext, break_pc: int, continue_pc: int):
+        for site in loop.break_sites:
+            self.code[site].arg = break_pc
+        for site in loop.continue_sites:
+            self.code[site].arg = continue_pc
+
     def _emit_while(self, st: A.While, layout: FunctionLayout, ctx: Context):
         loop_start = len(self.code)
         self._emit_expr(st.cond, layout, ctx)
         jz_index = len(self.code)
         self.code.append(Instruction(OpCode.JZ, 0))
+        loop = LoopContext()
+        self._loops.append(loop)
         for s in st.body:
             self._emit_stmt(s, layout, ctx)
+        self._loops.pop()
         self.code.append(Instruction(OpCode.JMP, loop_start))
-        self.code[jz_index].arg = len(self.code)
+        end_pc = len(self.code)
+        self.code[jz_index].arg = end_pc
+        # `continue` re-tests the condition, which is where the loop starts.
+        self._patch_loop(loop, break_pc=end_pc, continue_pc=loop_start)
+
+    def _emit_for(self, st: A.For, layout: FunctionLayout, ctx: Context):
+        if st.init is not None:
+            self._emit_stmt(st.init, layout, ctx)
+        loop_start = len(self.code)
+        jz_index = None
+        if st.cond is not None:
+            self._emit_expr(st.cond, layout, ctx)
+            jz_index = len(self.code)
+            self.code.append(Instruction(OpCode.JZ, 0))
+        loop = LoopContext()
+        self._loops.append(loop)
+        for s in st.body:
+            self._emit_stmt(s, layout, ctx)
+        self._loops.pop()
+        # `continue` lands on the step, not on the condition, so skipping the
+        # rest of an iteration still advances the loop.
+        step_pc = len(self.code)
+        if st.step is not None:
+            self._emit_stmt(st.step, layout, ctx)
+        self.code.append(Instruction(OpCode.JMP, loop_start))
+        end_pc = len(self.code)
+        if jz_index is not None:
+            self.code[jz_index].arg = end_pc
+        # With no condition there is no JZ to patch: the only way out is `break`.
+        self._patch_loop(loop, break_pc=end_pc, continue_pc=step_pc)
 
     def _emit_vm_asm(self, vm_asm: A.VmAsm, layout: FunctionLayout, ctx: Context) -> None:
         """Lower a vm_asm inline block into VM bytecode.
