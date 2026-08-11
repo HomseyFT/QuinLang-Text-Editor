@@ -47,6 +47,11 @@ def main():
         print(f"Codegen error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Warnings do not stop the program or change its exit code; they go to
+    # stderr so piping stdout stays clean.
+    for warning in ctx.warnings:
+        print(f"Warning: {warning}", file=sys.stderr)
+
     vm = QuinVM(code, functions, strings, structs)
     try:
         exit_value = vm.run_main()

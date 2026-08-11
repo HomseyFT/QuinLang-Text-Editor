@@ -9,6 +9,64 @@ from .compiler_types import (
 )
 from .builtins import get_builtins
 
+# A process exit code carries one byte, so only these values survive intact.
+EXIT_CODE_MAX = 255
+
+
+def wrap16(value: int) -> int:
+    """Narrow to a 16-bit signed int, as the VM's arithmetic does."""
+    value &= 0xFFFF
+    return value - 0x10000 if value & 0x8000 else value
+
+
+def const_int(e: A.Expr):
+    """Evaluate an expression built only from int literals, else return None.
+
+    Enough folding to recognise what people actually write for an exit code:
+    a literal, a negation, or the `0 - 1` idiom the language requires in place
+    of a negative literal. Results wrap at 16 bits so the value reported
+    matches the one the program will really return.
+    """
+    if isinstance(e, A.Literal):
+        if isinstance(e.value, int) and not isinstance(e.value, bool):
+            return wrap16(e.value)
+        return None
+    if isinstance(e, A.Unary):
+        v = const_int(e.right)
+        if v is None:
+            return None
+        if e.op == '-':
+            return wrap16(-v)
+        if e.op == '~':
+            return wrap16(~v)
+        return None
+    if isinstance(e, A.Binary):
+        a, b = const_int(e.left), const_int(e.right)
+        if a is None or b is None:
+            return None
+        if e.op == '+':
+            return wrap16(a + b)
+        if e.op == '-':
+            return wrap16(a - b)
+        if e.op == '*':
+            return wrap16(a * b)
+        return None
+    return None
+
+
+@dataclass
+class Diagnostic:
+    """Something worth telling the programmer that is not an error."""
+    message: str
+    line: int = 0
+    col: int = 0
+
+    def __str__(self) -> str:
+        if self.line or self.col:
+            return f"[{self.line}:{self.col}] {self.message}"
+        return self.message
+
+
 class SemanticError(Exception):
     def __init__(self, message: str, line: int = 0, col: int = 0):
         super().__init__(message)
@@ -90,6 +148,10 @@ class Context:
         # id(VmAsm) -> names visible at that block, since its body is raw text
         # that no other pass resolves.
         self.asm_scope: Dict[int, Dict[str, Symbol]] = {}
+        # Non-fatal diagnostics. Sema is the only pass that raises one today,
+        # but codegen already receives this Context, so it can add its own
+        # without any structural change.
+        self.warnings: List[Diagnostic] = []
 
     def set_type(self, node: A.Expr, t: Type):
         self.node_type[id(node)] = t
@@ -113,6 +175,8 @@ class SemanticAnalyzer:
         # 'break' or 'continue' with nothing to jump to is rejected here
         # rather than becoming a dangling jump in codegen.
         self._loop_depth = 0
+        # The function being analyzed, so a return in main can be recognised.
+        self._current_function = None
 
     def _resolve_type(self, name: str, line: int, col: int) -> Type:
         """Map a source-level type name onto a concrete Type, with location on failure."""
@@ -223,6 +287,7 @@ class SemanticAnalyzer:
         scope = Scope()
         self._frame = []
         self._loop_depth = 0
+        self._current_function = fn.name
         for p, t in zip(fn.params, sig.params):
             sym = scope.define(Symbol(p.name, t), p.line, p.col)
             self.ctx.bind(p, sym)
@@ -318,6 +383,8 @@ class SemanticAnalyzer:
                 val_t = self._analyze_expr(st.value, scope)
                 if not assignable(ret_type, val_t):
                     raise SemanticError(f"Return type mismatch: expected {ret_type}, got {val_t}", st.line, st.col)
+                if self._current_function == "main" and ret_type == Int:
+                    self._check_exit_code(st.value)
         elif isinstance(st, A.If):
             cond_t = self._analyze_expr(st.cond, scope)
             if cond_t != Bool:
@@ -375,6 +442,23 @@ class SemanticAnalyzer:
         else:
             # Ignore blocks etc.
             pass
+
+    def _check_exit_code(self, value: A.Expr):
+        """Warn when main returns a constant the exit code cannot represent.
+
+        Only constants can be judged here; `return f()` is left alone. The
+        point is to stop `return 256` from quietly exiting 0 and reading as
+        success.
+        """
+        result = const_int(value)
+        if result is None or 0 <= result <= EXIT_CODE_MAX:
+            return
+        self.ctx.warnings.append(Diagnostic(
+            f"main returns {result}, but a process exit code carries only the "
+            f"low byte, so this exits {result & 0xFF}. Return a value in "
+            f"0..{EXIT_CODE_MAX} to say what you mean.",
+            value.line, value.col,
+        ))
 
     def _always_returns(self, st: A.Stmt, scope: Scope, ret_type: Type) -> bool:
         """Return True if statement always returns (i.e., execution cannot continue past it)."""
