@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import Dict, Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 @dataclass(frozen=True)
 class Type:
@@ -26,6 +26,11 @@ Bool = Type("bool", 1)
 Ptr = Type("ptr", 2)
 HeapPtr = Type("heapptr", 2)
 
+# The type of the 'null' literal. It is not a type anyone can write down: it
+# exists so that null can initialize or be compared against any reference type
+# without those types collapsing into one.
+Null = Type("null", 2)
+
 BUILTIN_TYPES: Dict[str, Type] = {
     "int": Int,
     "str": Str,
@@ -36,6 +41,81 @@ BUILTIN_TYPES: Dict[str, Type] = {
 }
 
 ARRAY_PREFIX = "int["
+
+
+@dataclass(frozen=True)
+class StructType(Type):
+    """A reference to a heap-allocated struct.
+
+    A struct value is one word — the heap address of the object — so this is
+    the same size as any other reference. The field layout lives in StructInfo
+    rather than here, because Type is compared by value and two structs are the
+    same type exactly when they have the same name.
+
+    Subclassing matters: a dataclass __eq__ requires both sides to be the same
+    class, so StructType('Point', 2) never compares equal to Type('Point', 2).
+    """
+
+
+@dataclass(frozen=True)
+class StructField:
+    name: str
+    type: Type
+    offset: int  # in 16-bit words from the object's base address
+
+
+@dataclass
+class StructInfo:
+    """A struct's declared layout, and the id its heap header carries."""
+    name: str
+    type_id: int
+    fields: List[StructField] = field(default_factory=list)
+
+    @property
+    def word_size(self) -> int:
+        return len(self.fields)
+
+    def field_named(self, name: str) -> Optional[StructField]:
+        for f in self.fields:
+            if f.name == name:
+                return f
+        return None
+
+    def type(self) -> StructType:
+        # The size here is the size of a *reference*, always one word — not the
+        # size of the object, which lives in word_size. That matters for
+        # recursion: resolving `next: Node` builds Node's type while Node's own
+        # field list is still empty, so a size derived from the fields would
+        # make that type unequal to the completed one.
+        return StructType(self.name, 2)
+
+
+def is_struct_type(t: Type) -> bool:
+    return isinstance(t, StructType)
+
+
+def is_reference_type(t: Type) -> bool:
+    """Whether values of this type are heap addresses the GC must trace."""
+    return is_struct_type(t) or t == HeapPtr
+
+
+def assignable(target: Type, value: Type) -> bool:
+    """Whether a value of type `value` may be stored into a `target` slot.
+
+    There are no implicit conversions; the single exception is null, which
+    initializes any reference.
+    """
+    if target == value:
+        return True
+    return value == Null and is_reference_type(target)
+
+
+def comparable(left: Type, right: Type) -> bool:
+    """Whether == and != accept this pair of operand types."""
+    if left == right:
+        return True
+    return ((left == Null and is_reference_type(right))
+            or (right == Null and is_reference_type(left)))
 
 
 class UnknownTypeError(Exception):
@@ -64,7 +144,7 @@ def array_length_from_name(name: Optional[str]) -> Optional[int]:
     return n
 
 
-def type_from_name(name: str) -> Type:
+def type_from_name(name: str, structs: Optional[Dict[str, "StructInfo"]] = None) -> Type:
     if not isinstance(name, str):
         raise UnknownTypeError(f"Invalid type name {name!r}")
     n = array_length_from_name(name)
@@ -72,6 +152,8 @@ def type_from_name(name: str) -> Type:
         return Type(name, 2 * n)
     if name in BUILTIN_TYPES:
         return BUILTIN_TYPES[name]
+    if structs and name in structs:
+        return structs[name].type()
     raise UnknownTypeError(f"Unknown type '{name}'")
 
 

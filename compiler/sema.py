@@ -3,7 +3,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 from . import ast as A
 from .compiler_types import (
-    Type, Int, Str, Void, Bool, Ptr, HeapPtr, type_from_name, is_array_type, array_length, UnknownTypeError,
+    Type, Int, Str, Void, Bool, Ptr, HeapPtr, Null, StructInfo, StructField,
+    type_from_name, is_array_type, array_length, is_struct_type, is_reference_type,
+    assignable, comparable, BUILTIN_TYPES, UnknownTypeError,
 )
 from .builtins import get_builtins
 
@@ -74,6 +76,10 @@ class Context:
 
     def __init__(self):
         self.functions: Dict[str, FunctionSig] = {}
+        # Struct name -> its layout and heap type id. Codegen turns this into
+        # the table the VM carries, which is also what a collector needs to
+        # learn an object's size and which of its fields are references.
+        self.structs: Dict[str, StructInfo] = {}
         self.node_type: Dict[int, Type] = {}
         # id(Identifier | VarDecl | Param) -> the Symbol it refers to or declares.
         self.binding: Dict[int, Symbol] = {}
@@ -111,11 +117,59 @@ class SemanticAnalyzer:
     def _resolve_type(self, name: str, line: int, col: int) -> Type:
         """Map a source-level type name onto a concrete Type, with location on failure."""
         try:
-            return type_from_name(name)
+            return type_from_name(name, self.ctx.structs)
         except UnknownTypeError as e:
             raise SemanticError(str(e), line, col)
 
+    def _register_structs(self, program: A.Program):
+        """Resolve struct declarations in two phases.
+
+        Every name is registered before any field type is resolved, so a struct
+        may name itself or a struct declared later in the file. That is what
+        makes `struct Node { next: Node }` — and therefore any linked structure
+        — expressible.
+        """
+        for sd in program.structs:
+            if sd.name in self.ctx.structs:
+                raise SemanticError(f"Redefinition of struct '{sd.name}'", sd.line, sd.col)
+            if sd.name in BUILTIN_TYPES:
+                raise SemanticError(
+                    f"Struct '{sd.name}' shadows the built-in type '{sd.name}'", sd.line, sd.col
+                )
+            if not sd.fields:
+                raise SemanticError(
+                    f"Struct '{sd.name}' must declare at least one field", sd.line, sd.col
+                )
+            self.ctx.structs[sd.name] = StructInfo(sd.name, type_id=len(self.ctx.structs))
+
+        for sd in program.structs:
+            info = self.ctx.structs[sd.name]
+            fields: List[StructField] = []
+            seen: Dict[str, bool] = {}
+            for offset, f in enumerate(sd.fields):
+                if f.name in seen:
+                    raise SemanticError(
+                        f"Duplicate field '{f.name}' in struct '{sd.name}'", f.line, f.col
+                    )
+                seen[f.name] = True
+                ft = self._resolve_type(f.type_name, f.line, f.col)
+                if is_array_type(ft):
+                    raise SemanticError(
+                        f"Field '{f.name}' cannot be an array; arrays live in a frame, "
+                        f"not in a heap object",
+                        f.line, f.col,
+                    )
+                if ft == Void:
+                    raise SemanticError(
+                        f"Field '{f.name}' cannot have type void", f.line, f.col
+                    )
+                fields.append(StructField(f.name, ft, offset))
+            info.fields = fields
+
     def analyze(self, program: A.Program) -> Context:
+        # Structs first: function signatures may mention struct types.
+        self._register_structs(program)
+
         # Register builtin functions first
         for name, (param_names, ret_name) in get_builtins().items():
             if name in self.ctx.functions:
@@ -188,8 +242,14 @@ class SemanticAnalyzer:
             if st.init is not None:
                 init_t = self._analyze_expr(st.init, scope)
                 if var_type is None:
+                    if init_t == Null:
+                        raise SemanticError(
+                            f"Cannot infer type for '{st.name}' from 'null'; "
+                            f"annotate it with the reference type you mean",
+                            st.line, st.col,
+                        )
                     var_type = init_t
-                elif var_type != init_t:
+                elif not assignable(var_type, init_t):
                     raise SemanticError(f"Type mismatch in initializer for '{st.name}': {var_type} vs {init_t}", st.line, st.col)
                 # Arrays have no value form: there is no array literal and
                 # copying one would need a slot-wise copy the backend can't express.
@@ -218,7 +278,7 @@ class SemanticAnalyzer:
                         st.target.line, st.target.col,
                     )
                 val_t = self._analyze_expr(st.value, scope)
-                if sym.type != val_t:
+                if not assignable(sym.type, val_t):
                     raise SemanticError(f"Cannot assign {val_t} to {sym.type} variable '{st.target.name}'", st.target.line, st.target.col)
             elif isinstance(st.target, A.Index):
                 arr_t = self._analyze_expr(st.target.array, scope)
@@ -230,6 +290,15 @@ class SemanticAnalyzer:
                 val_t = self._analyze_expr(st.value, scope)
                 if val_t != Int:
                     raise SemanticError("Array elements must be int", st.line, st.col)
+            elif isinstance(st.target, A.FieldAccess):
+                # Typing the target validates the struct and the field name.
+                field_t = self._analyze_expr(st.target, scope)
+                val_t = self._analyze_expr(st.value, scope)
+                if not assignable(field_t, val_t):
+                    raise SemanticError(
+                        f"Cannot assign {val_t} to field '{st.target.field}' of type {field_t}",
+                        st.target.line, st.target.col,
+                    )
             else:
                 raise SemanticError("Invalid assignment target", st.line, st.col)
         elif isinstance(st, A.Print) or isinstance(st, A.PrintLn):
@@ -247,7 +316,7 @@ class SemanticAnalyzer:
                 raise SemanticError(f"Expected return value of type {ret_type}", st.line, st.col)
             if st.value is not None:
                 val_t = self._analyze_expr(st.value, scope)
-                if val_t != ret_type:
+                if not assignable(ret_type, val_t):
                     raise SemanticError(f"Return type mismatch: expected {ret_type}, got {val_t}", st.line, st.col)
         elif isinstance(st, A.If):
             cond_t = self._analyze_expr(st.cond, scope)
@@ -360,8 +429,8 @@ class SemanticAnalyzer:
     def _analyze_expr(self, e: A.Expr, scope: Scope) -> Type:
         if isinstance(e, A.Literal):
             if e.value is None:
-                self.ctx.set_type(e, HeapPtr)
-                return HeapPtr
+                self.ctx.set_type(e, Null)
+                return Null
             if isinstance(e.value, bool):
                 self.ctx.set_type(e, Bool)
                 return Bool
@@ -405,9 +474,16 @@ class SemanticAnalyzer:
                     if lt == HeapPtr and rt == Int:
                         self.ctx.set_type(e, HeapPtr)
                         return HeapPtr
+                    # heapptr - heapptr is deliberately absent. It was the only
+                    # expression that yielded a reference's numeric value as an
+                    # int, which would let a program stash an address somewhere
+                    # a collector does not look and then reconstruct it.
                     if lt == HeapPtr and rt == HeapPtr:
-                        self.ctx.set_type(e, Int)
-                        return Int
+                        raise SemanticError(
+                            "Cannot subtract two heapptr values; a reference cannot be "
+                            "converted to an int",
+                            e.line, e.col,
+                        )
                 # Fall through to existing int-only rule for all other combos.
                 if lt == Int and rt == Int:
                     self.ctx.set_type(e, Int)
@@ -443,7 +519,18 @@ class SemanticAnalyzer:
                     self.ctx.set_type(e, Int)
                     return Int
                 raise SemanticError("Right shift operator requires int operands", e.line, e.col)
-            if e.op in ('==', '!=', '<', '<=', '>', '>='):
+            if e.op in ('==', '!='):
+                # Equality is the one place null may meet a reference type.
+                if comparable(lt, rt):
+                    self.ctx.set_type(e, Bool)
+                    return Bool
+                raise SemanticError("Comparison requires operands of same type", e.line, e.col)
+            if e.op in ('<', '<=', '>', '>='):
+                if is_struct_type(lt) or is_struct_type(rt) or lt == Null or rt == Null:
+                    raise SemanticError(
+                        "Relational operators do not apply to struct references or null",
+                        e.line, e.col,
+                    )
                 if lt == rt:
                     self.ctx.set_type(e, Bool)
                     return Bool
@@ -473,6 +560,52 @@ class SemanticAnalyzer:
                 self.ctx.set_type(e, Ptr)
                 return Ptr
             raise SemanticError("Can only take address of variables or array elements", e.line, e.col)
+        if isinstance(e, A.FieldAccess):
+            obj_t = self._analyze_expr(e.obj, scope)
+            if not is_struct_type(obj_t):
+                raise SemanticError(
+                    f"Field access requires a struct value, got {obj_t}", e.line, e.col
+                )
+            info = self.ctx.structs[obj_t.name]
+            fld = info.field_named(e.field)
+            if fld is None:
+                raise SemanticError(
+                    f"Struct '{info.name}' has no field '{e.field}'", e.line, e.col
+                )
+            self.ctx.set_type(e, fld.type)
+            return fld.type
+        if isinstance(e, A.StructLit):
+            info = self.ctx.structs.get(e.struct_name)
+            if info is None:
+                raise SemanticError(f"Unknown struct '{e.struct_name}'", e.line, e.col)
+            seen: Dict[str, bool] = {}
+            for fi in e.fields:
+                if fi.name in seen:
+                    raise SemanticError(
+                        f"Field '{fi.name}' given twice in literal for '{info.name}'",
+                        fi.line, fi.col,
+                    )
+                fld = info.field_named(fi.name)
+                if fld is None:
+                    raise SemanticError(
+                        f"Struct '{info.name}' has no field '{fi.name}'", fi.line, fi.col
+                    )
+                seen[fi.name] = True
+                val_t = self._analyze_expr(fi.value, scope)
+                if not assignable(fld.type, val_t):
+                    raise SemanticError(
+                        f"Field '{fi.name}' expects {fld.type}, got {val_t}", fi.line, fi.col
+                    )
+            missing = [f.name for f in info.fields if f.name not in seen]
+            if missing:
+                raise SemanticError(
+                    f"Struct literal for '{info.name}' is missing field(s): "
+                    f"{', '.join(missing)}",
+                    e.line, e.col,
+                )
+            t = info.type()
+            self.ctx.set_type(e, t)
+            return t
         if isinstance(e, A.Call):
             # Special handling for array helpers
             if e.callee == "array_push":
@@ -507,7 +640,7 @@ class SemanticAnalyzer:
                 raise SemanticError(f"Function '{e.callee}' expects {len(sig.params)} args, got {len(e.args)}", e.line, e.col)
             for a, pt in zip(e.args, sig.params):
                 at = self._analyze_expr(a, scope)
-                if at != pt:
+                if not assignable(pt, at):
                     raise SemanticError(f"Argument type mismatch: expected {pt}, got {at}", e.line, e.col)
             self.ctx.set_type(e, sig.ret)
             return sig.ret

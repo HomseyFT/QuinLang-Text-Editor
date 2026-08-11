@@ -66,6 +66,7 @@ class TokenType(Enum):
     PRINTLN = auto()
     VM_ASM = auto()
     INCLUDE = auto()
+    STRUCT = auto()
 
     EOF = auto()
 
@@ -91,6 +92,7 @@ KEYWORDS = {
     "heapptr": TokenType.HEAPPTR,
     "vm_asm": TokenType.VM_ASM,
     "include": TokenType.INCLUDE,
+    "struct": TokenType.STRUCT,
 }
 
 @dataclass

@@ -45,6 +45,8 @@ class ImportResolver:
         self.source_files: List[Path] = []  # Order of inclusion
         self.all_functions: List[A.Function] = []
         self.function_origins: Dict[str, Path] = {}  # Track where each function was defined
+        self.all_structs: List[A.StructDef] = []
+        self.struct_origins: Dict[str, Path] = {}  # Track where each struct was defined
 
     def resolve(self, entry_file: Path) -> ResolvedProgram:
         """
@@ -63,11 +65,14 @@ class ImportResolver:
         self.source_files.clear()
         self.all_functions.clear()
         self.function_origins.clear()
+        self.all_structs.clear()
+        self.struct_origins.clear()
 
         self._resolve_file(entry_file.resolve())
 
         # Create merged program (no includes in the merged result)
-        merged = A.Program(includes=[], functions=self.all_functions)
+        merged = A.Program(includes=[], functions=self.all_functions,
+                           structs=self.all_structs)
         return ResolvedProgram(program=merged, source_files=self.source_files)
 
     def _resolve_file(self, file_path: Path) -> None:
@@ -102,6 +107,18 @@ class ImportResolver:
         for inc in program.includes:
             inc_path = self._resolve_path(inc.path, file_path)
             self._resolve_file(inc_path)
+
+        # Add structs from this file, on the same terms as functions: a name may
+        # only be defined once across the whole merged program.
+        for sd in program.structs:
+            if sd.name in self.struct_origins:
+                orig = self.struct_origins[sd.name]
+                raise ResolveError(
+                    f"Redefinition of struct '{sd.name}' in {file_path} "
+                    f"(previously defined in {orig})"
+                )
+            self.struct_origins[sd.name] = file_path
+            self.all_structs.append(sd)
 
         # Add functions from this file (after includes, so dependencies come first)
         for fn in program.functions:

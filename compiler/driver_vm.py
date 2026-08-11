@@ -23,7 +23,7 @@ def main():
 
         ctx = SemanticAnalyzer().analyze(ast)
         codegen = CodeGenVM()
-        code, functions, strings = codegen.generate(ast, ctx)
+        code, functions, strings, structs = codegen.generate(ast, ctx)
     except ResolveError as e:
         print(f"Import error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -34,7 +34,7 @@ def main():
         print(f"Codegen error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    vm = QuinVM(code, functions, strings)
+    vm = QuinVM(code, functions, strings, structs)
     try:
         vm.run_main()
     except VMError as e:

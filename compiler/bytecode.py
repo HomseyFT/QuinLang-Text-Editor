@@ -67,9 +67,15 @@ class OpCode(Enum):
     PRINTLN_STR = auto()
 
     # Heap operations
-    ALLOC = auto()
+    ALLOC = auto()             # pop size in bytes; allocate an untyped block
+    ALLOC_TYPED = auto()       # operand: struct type id; allocate that struct
     HEAP_LOAD = auto()
     HEAP_STORE = auto()
+    # Field access. The offset is an operand rather than an ADD on the address,
+    # so the null check tests the object reference itself: adding first would
+    # turn a null base into a small non-zero address and read whatever is there.
+    HEAP_LOAD_FIELD = auto()   # operand: word offset; pop ref, push field
+    HEAP_STORE_FIELD = auto()  # operand: word offset; pop value, pop ref
 
 
 Operand = Union[int, None]

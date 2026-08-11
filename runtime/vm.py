@@ -1,6 +1,6 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import List, Dict
+from dataclasses import dataclass, field
+from typing import List, Dict, Tuple
 from compiler.bytecode import OpCode, Instruction, Bytecode
 
 WORD_MASK = 0xFFFF
@@ -8,9 +8,27 @@ SIGN_BIT = 0x8000
 HEAP_SIZE = 64 * 1024
 NULL_ADDR = 0
 
+# Every heap object carries one header word immediately below the address the
+# program holds, so a collector handed a reference can recover what it points
+# at. The header is a struct type id, or RAW_TAG | byte-size for an untyped
+# block from alloc(). Untyped blocks are reachable and reclaimable but are
+# never traced through, which is sound because no expression in the language
+# can place a reference inside one.
+HEADER_BYTES = 2
+RAW_TAG = 0x8000
+MAX_RAW_ALLOC = RAW_TAG - 2
+
 
 class VMError(RuntimeError):
     """Raised when the VM detects an invalid operand, address, or stack state."""
+
+
+@dataclass
+class StructLayout:
+    """What a collector needs to know about one struct type."""
+    name: str
+    word_size: int
+    ref_offsets: Tuple[int, ...] = ()  # word offsets of fields holding references
 
 
 @dataclass
@@ -19,6 +37,11 @@ class FunctionInfo:
     entry_pc: int
     num_locals: int
     num_params: int
+    # The GC stack map: which of this frame's local slots hold references.
+    # Sound without liveness analysis because locals start at 0, and address 0
+    # is reserved for null, so a slot read before its first assignment is
+    # simply skipped.
+    ref_slots: Tuple[int, ...] = ()
 
 
 @dataclass
@@ -58,12 +81,14 @@ class QuinVM:
     silently corrupting its caller.
     """
 
-    def __init__(self, code: Bytecode, functions: List[FunctionInfo], strings: Dict[int, str]):
+    def __init__(self, code: Bytecode, functions: List[FunctionInfo], strings: Dict[int, str],
+                 structs: List[StructLayout] = None):
         self.code = code
         self.functions = functions
         # map name -> index for convenience
         self.func_index: Dict[str, int] = {f.name: i for i, f in enumerate(functions)}
         self.strings = strings
+        self.structs: List[StructLayout] = list(structs or [])
 
         self.stack: List[int] = []          # value stack
         self.call_stack: List[Frame] = []
@@ -113,17 +138,42 @@ class QuinVM:
             raise VMError(f"Unknown string id {sid} at pc={self.pc - 1}")
         return self.strings[sid]
 
-    def _alloc(self, size: int) -> int:
+    def _alloc(self, size: int, header: int) -> int:
+        """Reserve `size` bytes preceded by a header word, returning the body address."""
         if size < 0:
             raise VMError(f"Cannot allocate a negative size ({size})")
         # Align to 2 bytes so word access stays aligned.
         if size & 1:
             size += 1
-        addr = self.heap_ptr
+        header_addr = self.heap_ptr
+        addr = header_addr + HEADER_BYTES
         if addr + size > len(self.heap):
             raise VMError("Heap out of memory")
+        self._write_word(header_addr, header)
         self.heap_ptr = addr + size
         return addr
+
+    def _alloc_struct(self, type_id: int) -> int:
+        if type_id < 0 or type_id >= len(self.structs):
+            raise VMError(f"ALLOC_TYPED with unknown struct type id {type_id}")
+        return self._alloc(self.structs[type_id].word_size * 2, type_id)
+
+    def _alloc_raw(self, size: int) -> int:
+        if size > MAX_RAW_ALLOC:
+            raise VMError(
+                f"Allocation of {size} bytes is too large to record in an object "
+                f"header (max {MAX_RAW_ALLOC})"
+            )
+        # Record the rounded-up size, so the header matches what was reserved.
+        rounded = size + 1 if size > 0 and size & 1 else size
+        return self._alloc(size, RAW_TAG | max(rounded, 0))
+
+    def _read_word(self, addr: int) -> int:
+        return (self.heap[addr + 1] << 8) | self.heap[addr]
+
+    def _write_word(self, addr: int, value: int):
+        self.heap[addr] = value & 0xFF
+        self.heap[addr + 1] = (value >> 8) & 0xFF
 
     def _check_heap_word(self, addr: int, what: str):
         # A word access touches heap[addr] and heap[addr + 1].
@@ -355,24 +405,46 @@ class QuinVM:
                 print(self._string(self._pop()))
 
             elif op is OpCode.ALLOC:
-                self.stack.append(self._alloc(to_signed(self._pop())))
+                self.stack.append(self._alloc_raw(to_signed(self._pop())))
+
+            elif op is OpCode.ALLOC_TYPED:
+                self.stack.append(self._alloc_struct(int(arg)))
 
             elif op is OpCode.HEAP_LOAD:
-                addr = to_signed(self._pop())
+                # A heap address spans the full 0..65535 word range, so it is
+                # read unsigned. Sign-extending it would put everything in the
+                # upper half of the heap at a negative address.
+                addr = self._pop()
                 if addr == NULL_ADDR:
                     raise VMError("Null pointer dereference in HEAP_LOAD")
                 self._check_heap_word(addr, "HEAP_LOAD")
                 # little-endian word
-                self.stack.append((self.heap[addr + 1] << 8) | self.heap[addr])
+                self.stack.append(self._read_word(addr))
 
             elif op is OpCode.HEAP_STORE:
                 value = self._pop()
-                addr = to_signed(self._pop())
+                addr = self._pop()
                 if addr == NULL_ADDR:
                     raise VMError("Null pointer dereference in HEAP_STORE")
                 self._check_heap_word(addr, "HEAP_STORE")
-                self.heap[addr] = value & 0xFF
-                self.heap[addr + 1] = (value >> 8) & 0xFF
+                self._write_word(addr, value)
+
+            elif op is OpCode.HEAP_LOAD_FIELD:
+                ref = self._pop()
+                if ref == NULL_ADDR:
+                    raise VMError("Null pointer dereference reading a field")
+                addr = ref + int(arg) * 2
+                self._check_heap_word(addr, "HEAP_LOAD_FIELD")
+                self.stack.append(self._read_word(addr))
+
+            elif op is OpCode.HEAP_STORE_FIELD:
+                value = self._pop()
+                ref = self._pop()
+                if ref == NULL_ADDR:
+                    raise VMError("Null pointer dereference writing a field")
+                addr = ref + int(arg) * 2
+                self._check_heap_word(addr, "HEAP_STORE_FIELD")
+                self._write_word(addr, value)
 
             else:
                 raise VMError(f"Unknown opcode {op}")

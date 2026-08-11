@@ -18,9 +18,28 @@ class Parser:
         while self._match(TokenType.INCLUDE):
             includes.append(self._include())
         funcs: List[A.Function] = []
+        structs: List[A.StructDef] = []
         while not self._is_at_end():
-            funcs.append(self._function())
-        return A.Program(includes, funcs)
+            if self._check(TokenType.STRUCT):
+                structs.append(self._struct_def())
+            else:
+                funcs.append(self._function())
+        return A.Program(includes, funcs, structs)
+
+    def _struct_def(self) -> A.StructDef:
+        self._consume(TokenType.STRUCT, "Expected 'struct'")
+        name_tok = self._consume(TokenType.IDENTIFIER, "Expected struct name")
+        self._consume(TokenType.LEFT_BRACE, "Expected '{' after struct name")
+        fields: List[A.FieldDef] = []
+        while not self._check(TokenType.RIGHT_BRACE):
+            f_tok = self._consume(TokenType.IDENTIFIER, "Expected field name")
+            self._consume(TokenType.COLON, "Expected ':' after field name")
+            f_type = self._type_name()
+            fields.append(A.FieldDef(f_tok.lexeme, f_type, line=f_tok.line, col=f_tok.col))
+            if not self._match(TokenType.COMMA):
+                break
+        self._consume(TokenType.RIGHT_BRACE, "Expected '}' after struct fields")
+        return A.StructDef(name_tok.lexeme, fields, line=name_tok.line, col=name_tok.col)
 
     def _include(self) -> A.Include:
         path_tok = self._consume(TokenType.STRING, "Expected path string after 'include'")
@@ -364,8 +383,26 @@ class Parser:
                 self._consume(TokenType.RIGHT_BRACKET, "Expected ']' after index expression")
                 expr = A.Index(expr, index_expr, line=bracket_tok.line, col=bracket_tok.col)
                 continue
+            # Field access: expr '.' IDENT
+            if self._match(TokenType.DOT):
+                field_tok = self._consume(TokenType.IDENTIFIER, "Expected field name after '.'")
+                expr = A.FieldAccess(expr, field_tok.lexeme, line=field_tok.line, col=field_tok.col)
+                continue
             break
         return expr
+
+    def _struct_literal(self, name_tok: Token) -> A.StructLit:
+        self._consume(TokenType.LEFT_BRACE, "Expected '{' to start struct literal")
+        inits: List[A.FieldInit] = []
+        while not self._check(TokenType.RIGHT_BRACE):
+            f_tok = self._consume(TokenType.IDENTIFIER, "Expected field name in struct literal")
+            self._consume(TokenType.COLON, "Expected ':' after field name")
+            value = self._expression()
+            inits.append(A.FieldInit(f_tok.lexeme, value, line=f_tok.line, col=f_tok.col))
+            if not self._match(TokenType.COMMA):
+                break
+        self._consume(TokenType.RIGHT_BRACE, "Expected '}' after struct literal fields")
+        return A.StructLit(name_tok.lexeme, inits, line=name_tok.line, col=name_tok.col)
 
     def _vm_asm_block(self, kw_tok: Token) -> A.Stmt:
         # Parse: vm_asm { INSTR ...; INSTR2 ...; }
@@ -407,6 +444,11 @@ class Parser:
             return A.Literal(tok.literal, line=tok.line, col=tok.col)
         if self._match(TokenType.IDENTIFIER):
             tok = self._previous()
+            # `Name { ... }` is a struct literal. This is unambiguous because
+            # every condition in the language is parenthesized, so an
+            # identifier is never directly followed by a block.
+            if self._check(TokenType.LEFT_BRACE):
+                return self._struct_literal(tok)
             return A.Identifier(tok.lexeme, line=tok.line, col=tok.col)
         if self._match(TokenType.LEFT_PAREN):
             expr = self._expression()

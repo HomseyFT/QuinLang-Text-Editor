@@ -4,7 +4,7 @@ from typing import Dict, List
 from . import ast as A
 from .bytecode import OpCode, Instruction, Bytecode
 from .sema import Context, Symbol
-from .compiler_types import Int, Str, Bool, Void, array_length
+from .compiler_types import Int, Str, Bool, Void, array_length, is_reference_type
 
 
 class CodegenError(Exception):
@@ -49,6 +49,8 @@ class FunctionLayout:
     num_locals: int
     num_params: int
     entry_pc: int = 0
+    # Slots in this frame that hold heap references, for the GC stack map.
+    ref_slots: List[int] = field(default_factory=list)
     # Symbol -> slot, for every symbol sema recorded in this frame. Keyed by
     # the Symbol object rather than by name, so shadowed and sibling-scope
     # declarations get distinct storage for free.
@@ -135,12 +137,22 @@ class CodeGenVM:
             layout.entry_pc = len(self.code)
             self._emit_function(fn, layout, ctx)
 
-        from runtime.vm import FunctionInfo
+        from runtime.vm import FunctionInfo, StructLayout
         fns = [
-            FunctionInfo(fl.name, fl.entry_pc, fl.num_locals, fl.num_params)
+            FunctionInfo(fl.name, fl.entry_pc, fl.num_locals, fl.num_params,
+                         tuple(fl.ref_slots))
             for fl in self.functions
         ]
-        return self.code, fns, self.strings
+        # The struct table doubles as the collector's object map: it gives an
+        # object's size and which of its words are references.
+        layouts = [None] * len(ctx.structs)
+        for info in ctx.structs.values():
+            layouts[info.type_id] = StructLayout(
+                name=info.name,
+                word_size=info.word_size,
+                ref_offsets=tuple(f.offset for f in info.fields if is_reference_type(f.type)),
+            )
+        return self.code, fns, self.strings, layouts
 
     def _build_layout(self, fn: A.Function, ctx: Context) -> FunctionLayout:
         """Give every symbol sema found in this frame its own slot.
@@ -157,10 +169,13 @@ class CodeGenVM:
             )
 
         slots: Dict[Symbol, LocalSlot] = {}
+        ref_slots: List[int] = []
         next_idx = 0
         for sym in symbols:
             length = array_length(sym.type) or 0
             slots[sym] = LocalSlot(next_idx, length)
+            if is_reference_type(sym.type):
+                ref_slots.append(next_idx)
             next_idx += length if length else 1
 
         return FunctionLayout(
@@ -168,6 +183,7 @@ class CodeGenVM:
             num_locals=next_idx,
             num_params=len(fn.params),
             slots=slots,
+            ref_slots=ref_slots,
         )
 
     def _emit_function(self, fn: A.Function, layout: FunctionLayout, ctx: Context):
@@ -212,6 +228,12 @@ class CodeGenVM:
                 self._emit_expr(st.target.index, layout, ctx)
                 self.code.append(Instruction(OpCode.BOUNDS_CHECK, slot.length))
                 self.code.append(Instruction(OpCode.STORE_LOCAL_IDX, slot.index))
+            elif isinstance(st.target, A.FieldAccess):
+                # HEAP_STORE_FIELD pops the value, then the object reference.
+                fld = self._field_of(st.target, ctx)
+                self._emit_expr(st.target.obj, layout, ctx)
+                self._emit_expr(st.value, layout, ctx)
+                self.code.append(Instruction(OpCode.HEAP_STORE_FIELD, fld.offset))
             else:
                 raise CodegenError(f"[{st.line}:{st.col}] Invalid assignment target")
         elif isinstance(st, A.Print):
@@ -491,12 +513,51 @@ class CodeGenVM:
             self._emit_expr(e.index, layout, ctx)
             self.code.append(Instruction(OpCode.BOUNDS_CHECK, slot.length))
             self.code.append(Instruction(OpCode.LOAD_LOCAL_IDX, slot.index))
+        elif isinstance(e, A.FieldAccess):
+            fld = self._field_of(e, ctx)
+            self._emit_expr(e.obj, layout, ctx)
+            self.code.append(Instruction(OpCode.HEAP_LOAD_FIELD, fld.offset))
+        elif isinstance(e, A.StructLit):
+            self._emit_struct_lit(e, layout, ctx)
         elif isinstance(e, A.Call):
             self._emit_call(e, layout, ctx)
         else:
             raise CodegenError(
                 f"[{e.line}:{e.col}] Unsupported expression type {type(e).__name__}"
             )
+
+    def _field_of(self, e: A.FieldAccess, ctx: Context):
+        """The StructField that sema resolved this access to."""
+        obj_t = ctx.get_type(e.obj)
+        info = ctx.structs.get(obj_t.name)
+        if info is None:
+            raise CodegenError(
+                f"[{e.line}:{e.col}] '{obj_t}' is not a struct type"
+            )
+        fld = info.field_named(e.field)
+        if fld is None:
+            raise CodegenError(
+                f"[{e.line}:{e.col}] Struct '{info.name}' has no field '{e.field}'"
+            )
+        return fld
+
+    def _emit_struct_lit(self, e: A.StructLit, layout: FunctionLayout, ctx: Context):
+        info = ctx.structs.get(e.struct_name)
+        if info is None:
+            raise CodegenError(f"[{e.line}:{e.col}] Unknown struct '{e.struct_name}'")
+        # ALLOC_TYPED leaves the new object's address on the stack; each field
+        # store consumes a copy of it, so the address survives to be the value
+        # of the whole expression.
+        self.code.append(Instruction(OpCode.ALLOC_TYPED, info.type_id))
+        for fi in e.fields:  # written order, so side effects run left to right
+            fld = info.field_named(fi.name)
+            if fld is None:
+                raise CodegenError(
+                    f"[{fi.line}:{fi.col}] Struct '{info.name}' has no field '{fi.name}'"
+                )
+            self.code.append(Instruction(OpCode.DUP))
+            self._emit_expr(fi.value, layout, ctx)
+            self.code.append(Instruction(OpCode.HEAP_STORE_FIELD, fld.offset))
 
     def _emit_binary(self, e: A.Binary, layout: FunctionLayout, ctx: Context):
         if e.op == '&&':

@@ -46,6 +46,21 @@ class Index(Expr):
 class AddressOf(Expr):
     target: Expr  # Identifier or Index
 
+@dataclass
+class FieldAccess(Expr):
+    obj: Expr
+    field: str
+
+@dataclass
+class FieldInit(Node):
+    name: str
+    value: Expr
+
+@dataclass
+class StructLit(Expr):
+    struct_name: str
+    fields: List[FieldInit]
+
 # Statements
 @dataclass
 class Stmt(Node):
@@ -128,6 +143,16 @@ class Function(Node):
     body: List[Stmt]
 
 @dataclass
+class FieldDef(Node):
+    name: str
+    type_name: str
+
+@dataclass
+class StructDef(Node):
+    name: str
+    fields: List[FieldDef]
+
+@dataclass
 class Include(Node):
     path: str  # The string literal path from the include statement
 
@@ -135,3 +160,4 @@ class Include(Node):
 class Program(Node):
     includes: List[Include]
     functions: List[Function]
+    structs: List[StructDef] = field(default_factory=list)
