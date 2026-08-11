@@ -8,6 +8,13 @@ struct Node {
     next: Node,
 }
 
+// Deliberately much larger than a Node, to make the holes it leaves behind
+// too small to be useful without compaction.
+struct Wide {
+    a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int,
+    i: int, j: int, k: int, l: int, m: int, n: int, o: int, p: int,
+}
+
 // Each call allocates a node and then drops it: once make_garbage returns,
 // its frame is gone and nothing refers to that node any more.
 fn make_garbage(): void {
@@ -58,6 +65,29 @@ fn main(): int {
     }
     gc();
     println(length(keep));        // 10
+
+    // Fragmentation, and why the collector moves things.
+    //
+    // Each iteration allocates a large block that immediately dies, then a
+    // small node that survives on the list. The survivors end up scattered
+    // through the heap with dead space between them, so the free memory is
+    // thousands of separate holes and none of them is large.
+    //
+    // A collector that only freed objects in place could not satisfy the Wide
+    // allocation below: there would be plenty of free bytes and no single gap
+    // big enough. Sliding the survivors together turns all those holes into
+    // one run, and the allocation succeeds.
+    let scattered: Node = null;
+    for (let i = 0; i < 1200; i = i + 1) {
+        let dead: Wide = Wide { a:0, b:0, c:0, d:0, e:0, f:0, g:0, h:0,
+                                i:0, j:0, k:0, l:0, m:0, n:0, o:0, p:0 };
+        scattered = Node { value: i, next: scattered };
+    }
+    let wide: Wide = Wide { a:1, b:0, c:0, d:0, e:0, f:0, g:0, h:0,
+                            i:0, j:0, k:0, l:0, m:0, n:0, o:0, p:0 };
+    println(wide.a);              // 1
+    println(length(scattered));   // 1200
+    println(length(keep));        // 10 — untouched by all of it
 
     return 0;
 }

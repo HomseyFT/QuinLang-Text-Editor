@@ -28,11 +28,14 @@ HEAP_START = NULL_ADDR + 2  # leave address 0 reserved for null
 
 KIND_STRUCT = 0  # detail is a struct type id; trace its reference fields
 KIND_RAW = 1     # detail is a byte size; reachable, reclaimable, never traced
-KIND_FREE = 2    # detail is a byte size; payload holds the next free block
 MARK_BIT = 0x8000
 
-# A free block stores its successor in the first word of its payload, so every
-# block must have room for one.
+# There is no free-block kind: the collector slides live objects together, so
+# free space is always the single region above heap_ptr and never needs to be
+# described in the heap itself.
+
+# Blocks are kept to a whole word so that no block is zero-sized, which keeps
+# every address unambiguously inside exactly one block.
 MIN_PAYLOAD = 2
 
 
@@ -79,6 +82,7 @@ class HeapStats:
     objects_freed: int = 0
     bytes_freed: int = 0
     objects_allocated: int = 0
+    objects_moved: int = 0
 
 
 def to_signed(v: int) -> int:
@@ -134,8 +138,10 @@ class QuinVM:
         self.heap: bytearray = bytearray(HEAP_SIZE)
         # Address 0 is reserved for null, so a real allocation can never be at
         # address 0 and an unassigned local reads as null.
-        self.heap_ptr: int = HEAP_START     # start of never-yet-allocated memory
-        self.free_head: int = 0             # header address of the first free block, 0 = none
+        # Everything below heap_ptr is allocated, everything above is free.
+        # Compaction is what keeps that true: there is no free list, because
+        # after a collection there are no holes to describe.
+        self.heap_ptr: int = HEAP_START
         self.stats = HeapStats()
 
     def run_main(self) -> int:
@@ -234,62 +240,34 @@ class QuinVM:
     # -- allocation ------------------------------------------------------
 
     def _reserve(self, payload: int, kind: int, detail: int) -> int:
-        """Find room for a block, collecting once if the heap looks full.
+        """Find room for a block, collecting once if the heap is full.
 
-        Returns the payload address, or raises if even a collection does not
-        free enough.
+        Allocation is a bump and nothing more. Compaction leaves all free
+        space in one run above heap_ptr, so there is never a hole to search
+        for or a remainder to split.
         """
         payload = max(payload, MIN_PAYLOAD)
         if payload & 1:
             payload += 1  # keep word accesses aligned
 
-        addr = self._try_reserve(payload, kind, detail)
+        addr = self._bump(payload, kind, detail)
         if addr is not None:
             return addr
         self.collect()
-        addr = self._try_reserve(payload, kind, detail)
+        addr = self._bump(payload, kind, detail)
         if addr is None:
             raise VMError("Heap out of memory")
         return addr
 
-    def _try_reserve(self, payload: int, kind: int, detail: int):
-        """One allocation attempt: reuse a free block, else extend the heap."""
-        hdr = self._take_from_free_list(payload)
-        if hdr is None:
-            end = self.heap_ptr + HEADER_BYTES + payload
-            if end > len(self.heap):
-                return None
-            hdr = self.heap_ptr
-            self.heap_ptr = end
-            self._write_header(hdr, kind, detail)
-        else:
-            self._write_header(hdr, kind, detail)
+    def _bump(self, payload: int, kind: int, detail: int):
+        end = self.heap_ptr + HEADER_BYTES + payload
+        if end > len(self.heap):
+            return None
+        hdr = self.heap_ptr
+        self.heap_ptr = end
+        self._write_header(hdr, kind, detail)
         self.stats.objects_allocated += 1
         return hdr + HEADER_BYTES
-
-    def _take_from_free_list(self, payload: int):
-        """First-fit search, splitting a block that is comfortably too large."""
-        prev = 0
-        cur = self.free_head
-        while cur:
-            available = self._payload_size(cur)
-            nxt = self._read_word(cur + HEADER_BYTES)
-            if available >= payload:
-                leftover = available - payload
-                if leftover >= HEADER_BYTES + MIN_PAYLOAD:
-                    # Split: the tail becomes a free block in its own right.
-                    tail = cur + HEADER_BYTES + payload
-                    self._write_header(tail, KIND_FREE, leftover - HEADER_BYTES)
-                    self._write_word(tail + HEADER_BYTES, nxt)
-                    nxt = tail
-                    self._write_word(cur + 2, payload)  # shrink this block
-                if prev:
-                    self._write_word(prev + HEADER_BYTES, nxt)
-                else:
-                    self.free_head = nxt
-                return cur
-            prev, cur = cur, nxt
-        return None
 
     def _alloc_struct(self, type_id: int) -> int:
         if type_id < 0 or type_id >= len(self.structs):
@@ -315,12 +293,26 @@ class QuinVM:
     # -- collection ------------------------------------------------------
 
     def collect(self):
-        """A precise, non-moving mark-sweep cycle."""
+        """A precise, sliding mark-compact cycle.
+
+        Marking is unchanged. What follows it is: work out where each surviving
+        object will sit once the gaps are closed, rewrite every reference to
+        point there, and only then move anything. Building the whole plan
+        before touching the heap is what makes the move a plain copy.
+
+        Moving objects is safe only because the roots are exact and because no
+        QuinLang expression can turn a reference into an int -- neither
+        `heapptr - heapptr` nor address-of on a reference exists. A program
+        cannot be holding a copy of an address that the collector fails to
+        find and update.
+        """
         self.stats.collections += 1
         starts = self._object_starts()
         for ref in self._roots():
             self._mark_from(ref, starts)
-        self._sweep()
+        forward = self._plan_compaction()
+        self._update_references(forward, starts)
+        self._slide(forward)
 
     def _object_starts(self) -> List[int]:
         """Payload addresses of every live block, ascending.
@@ -328,7 +320,7 @@ class QuinVM:
         Used to resolve a reference that points into the middle of a block:
         heapptr arithmetic can produce one, and it still keeps its object alive.
         """
-        return [hdr + HEADER_BYTES for hdr in self._blocks() if self._kind(hdr) != KIND_FREE]
+        return [hdr + HEADER_BYTES for hdr in self._blocks()]
 
     def _roots(self):
         """Every reference the running program can still reach."""
@@ -378,56 +370,97 @@ class QuinVM:
                 for off in layout.ref_offsets:
                     pending.append(self._read_word(start + off * 2))
 
-    def _sweep(self):
-        """Free unmarked blocks, merging neighbours so the space stays usable."""
-        self.free_head = 0
-        run_start = None   # header address of the run of free bytes being built
-        run_end = None
+    def _plan_compaction(self) -> Dict[int, int]:
+        """Decide where every surviving object will live once gaps are closed.
 
-        def close_run():
-            nonlocal run_start, run_end
-            if run_start is None:
-                return
-            self._write_header(run_start, KIND_FREE, run_end - run_start - HEADER_BYTES)
-            self._write_word(run_start + HEADER_BYTES, self.free_head)
-            self.free_head = run_start
-            run_start = run_end = None
-
-        for hdr in list(self._blocks()):
-            end = self._block_end(hdr)
-            if self._kind(hdr) != KIND_FREE and self._is_marked(hdr):
-                self._set_mark(hdr, False)
-                close_run()
+        Returns old payload address -> new payload address. The map is an
+        ordinary dict rather than forwarding words written into the heap: the
+        collector runs in Python, so it can afford host memory, and the pass
+        reads as the arithmetic it is. A collector living inside the heap it
+        manages would not have that luxury.
+        """
+        forward: Dict[int, int] = {}
+        free = HEAP_START
+        for hdr in self._blocks():
+            if not self._is_marked(hdr):
                 continue
-            if self._kind(hdr) != KIND_FREE:
-                self.stats.objects_freed += 1
-                self.stats.bytes_freed += end - hdr
-            # Extend the current run of free space, coalescing with whatever
-            # came immediately before it.
-            if run_start is None:
-                run_start = hdr
-            run_end = end
-        close_run()
+            forward[hdr + HEADER_BYTES] = free + HEADER_BYTES
+            free += HEADER_BYTES + self._payload_size(hdr)
+        return forward
 
-        # A free run that reaches the top of the heap is better given back to
-        # the bump pointer than kept on the free list.
-        if self.free_head and self._block_end(self.free_head) == self.heap_ptr:
-            self.heap_ptr = self.free_head
-            self.free_head = self._read_word(self.free_head + HEADER_BYTES)
+    def _update_references(self, forward: Dict[int, int], starts: List[int]):
+        """Rewrite every reference to the address its object is moving to.
+
+        This runs before anything moves, reading and writing objects where they
+        still are. Once it finishes, the bytes are already correct and the move
+        is a plain copy.
+        """
+        def moved(ref: int) -> int:
+            if ref == NULL_ADDR:
+                return ref
+            start = self._containing_object(ref, starts)
+            if start is None or start not in forward:
+                return ref
+            # Keep the offset: a reference may point into the middle of a
+            # block, since heapptr + int is allowed.
+            return forward[start] + (ref - start)
+
+        frames = [(self.current_fn, self.locals)]
+        frames.extend((f.fn_index, f.locals) for f in self.call_stack)
+        for fn_index, local_values in frames:
+            if fn_index >= len(self.functions):
+                continue
+            for slot in self.functions[fn_index].ref_slots:
+                if slot < len(local_values):
+                    local_values[slot] = moved(local_values[slot])
+
+        for i, is_ref in enumerate(self.stack_is_ref):
+            if is_ref:
+                self.stack[i] = moved(self.stack[i])
+
+        for hdr in self._blocks():
+            if not self._is_marked(hdr) or self._kind(hdr) != KIND_STRUCT:
+                continue
+            start = hdr + HEADER_BYTES
+            for off in self.structs[self._detail(hdr)].ref_offsets:
+                self._write_word(start + off * 2, moved(self._read_word(start + off * 2)))
+
+    def _slide(self, forward: Dict[int, int]):
+        """Move each surviving object down into the space the dead vacated.
+
+        Blocks are copied in ascending address order and only ever downward, so
+        a block's destination always lies below every block still to be moved
+        and cannot overwrite one.
+        """
+        top = HEAP_START
+        for hdr in list(self._blocks()):
+            size = HEADER_BYTES + self._payload_size(hdr)
+            if not self._is_marked(hdr):
+                self.stats.objects_freed += 1
+                self.stats.bytes_freed += size
+                continue
+            dest = forward[hdr + HEADER_BYTES] - HEADER_BYTES
+            if dest != hdr:
+                self.heap[dest:dest + size] = self.heap[hdr:hdr + size]
+                self.stats.objects_moved += 1
+            self._set_mark(dest, False)
+            top = dest + size
+        # Wipe the space the survivors vacated. Sliding an object down leaves
+        # its old bytes untouched, so a reference the collector failed to
+        # update would still read the stale copy and quietly return the right
+        # answer -- a bug that only surfaces once that memory is handed out
+        # again. Zeroing turns it into an immediate null dereference instead.
+        if top < self.heap_ptr:
+            self.heap[top:self.heap_ptr] = bytes(self.heap_ptr - top)
+        self.heap_ptr = top
 
     def heap_in_use(self) -> int:
-        """Bytes currently held by live objects, headers included."""
-        return sum(self._block_end(h) - h for h in self._blocks()
-                   if self._kind(h) != KIND_FREE)
+        """Bytes the heap is currently holding, headers included.
 
-    def free_blocks(self) -> List[Tuple[int, int]]:
-        """(header address, payload size) for each block on the free list."""
-        out = []
-        cur = self.free_head
-        while cur:
-            out.append((cur, self._payload_size(cur)))
-            cur = self._read_word(cur + HEADER_BYTES)
-        return out
+        Immediately after a collection this is exactly the live data. Before
+        one it also counts objects that are unreachable but not yet collected.
+        """
+        return self.heap_ptr - HEAP_START
 
     def _read_word(self, addr: int) -> int:
         return (self.heap[addr + 1] << 8) | self.heap[addr]
