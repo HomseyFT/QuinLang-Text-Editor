@@ -556,6 +556,13 @@ class QuinVM:
                     res = a >= b
                 self._push(int(res))
 
+            elif op is OpCode.STR_CMP:
+                b = self._string(self._pop())
+                a = self._string(self._pop())
+                # A plain int, not a reference: the collector must not treat
+                # this as a heap address.
+                self._push(0 if a == b else (1 if a > b else -1))
+
             elif op is OpCode.NOT:
                 self._push(0 if self._pop() else 1)
 

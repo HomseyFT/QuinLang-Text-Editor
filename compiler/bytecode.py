@@ -31,6 +31,11 @@ class OpCode(Enum):
     CMP_GT = auto()
     CMP_GE = auto()
 
+    # Pop two string ids, push -1, 0, or 1 by content order. The comparison
+    # opcodes above then compare that against zero, so all six operators work
+    # through one instruction.
+    STR_CMP = auto()
+
     # Logical
     NOT = auto()
     BITNOT = auto()

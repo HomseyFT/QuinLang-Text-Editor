@@ -7,6 +7,9 @@ from .sema import Context, Symbol
 from .compiler_types import Int, Str, Bool, Void, array_length, is_reference_type
 
 
+COMPARISONS = ("==", "!=", "<", "<=", ">", ">=")
+
+
 class CodegenError(Exception):
     """Raised when the AST cannot be lowered to bytecode.
 
@@ -617,6 +620,18 @@ class CodeGenVM:
             raise CodegenError(f"[{e.line}:{e.col}] Unknown binary operator '{e.op}'")
         self._emit_expr(e.left, layout, ctx)
         self._emit_expr(e.right, layout, ctx)
+        if e.op in COMPARISONS and ctx.get_type(e.left) == Str:
+            # Strings are held as interned ids, and comparing ids would order
+            # them by whichever literal the compiler happened to see first.
+            # STR_CMP reduces the pair to -1/0/1, which the ordinary comparison
+            # opcode then tests against zero -- so all six operators come out
+            # comparing content, through one extra instruction.
+            #
+            # The VM has to be told, rather than working it out: the operand
+            # stack is untyped words, so at run time a string id is
+            # indistinguishable from an int.
+            self.code.append(Instruction(OpCode.STR_CMP))
+            self.code.append(Instruction(OpCode.PUSH_INT, 0))
         self.code.append(Instruction(binary_ops[e.op]))
 
     def _emit_call(self, e: A.Call, layout: FunctionLayout, ctx: Context):
