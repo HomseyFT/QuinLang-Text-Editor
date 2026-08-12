@@ -760,6 +760,14 @@ class CodeGenVM:
             self._emit_expr(e.args[0], layout, ctx)
             self.code.append(Instruction(OpCode.HEAP_LOAD))
             return
+        if name == "panic" and len(e.args) == 1:
+            self._emit_expr(e.args[0], layout, ctx)
+            self.code.append(Instruction(OpCode.PANIC))
+            # PANIC never falls through, but the calling convention says every
+            # expression leaves one value, and the statement that wraps this
+            # will pop it.
+            self.code.append(Instruction(OpCode.PUSH_INT, 0))
+            return
         if name == "gc" and not e.args:
             self.code.append(Instruction(OpCode.GC))
             self.code.append(Instruction(OpCode.PUSH_INT, 0))  # void result

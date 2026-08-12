@@ -489,6 +489,12 @@ class SemanticAnalyzer:
         """Return True if statement always returns (i.e., execution cannot continue past it)."""
         if isinstance(st, A.Return):
             return True
+        if (isinstance(st, A.ExprStmt) and isinstance(st.expr, A.Call)
+                and st.expr.callee == "panic"):
+            # panic stops the program, so nothing after it can run. Without
+            # this, every panic in a non-void function would need a dummy
+            # return after it to satisfy the return check.
+            return True
         if isinstance(st, A.Block):
             # A block always returns if any statement in it always returns
             for s in st.stmts:

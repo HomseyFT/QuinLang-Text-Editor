@@ -732,6 +732,9 @@ class QuinVM:
             elif op is OpCode.GC:
                 self.collect()
 
+            elif op is OpCode.PANIC:
+                raise VMError(self._string(self._pop()))
+
             elif op is OpCode.ALLOC_TYPED:
                 self._push(self._alloc_struct(int(arg)), True)
 

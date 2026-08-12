@@ -32,4 +32,8 @@ def get_builtins() -> Dict[str, BuiltinSig]:
         # allocation cannot be satisfied; this exists so a program (or a test)
         # can ask for one at a known point.
         "gc":         ([], "void"),
+        # Abort with a message. Nothing else in the language can report a
+        # problem, so a library function given bad arguments has no way to
+        # complain without this.
+        "panic":      (["str"], "void"),
     }

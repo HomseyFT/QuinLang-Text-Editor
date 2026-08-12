@@ -82,6 +82,7 @@ class OpCode(Enum):
     HEAP_LOAD_FIELD = auto()   # operand: word offset; pop ref, push field
     HEAP_STORE_FIELD = auto()  # operand: word offset; pop value, pop ref
     GC = auto()                # force a collection
+    PANIC = auto()             # pop a message id and stop the program
 
 
 Operand = Union[int, None]
