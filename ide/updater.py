@@ -20,7 +20,7 @@ import urllib.error
 # Configuration - UPDATE THESE FOR YOUR REPO
 GITHUB_OWNER = "HomseyFT"
 GITHUB_REPO = "QuinLang-Text-Editor"
-CURRENT_VERSION = "2.0.8"  # Bumped automatically by .github/workflows/sync-compiler.yml
+CURRENT_VERSION = "2.0.9"  # Bumped automatically by .github/workflows/sync-compiler.yml
 
 
 @dataclass
