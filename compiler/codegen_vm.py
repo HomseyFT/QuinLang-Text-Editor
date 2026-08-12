@@ -44,6 +44,9 @@ class LoopContext:
     """
     break_sites: List[int] = field(default_factory=list)
     continue_sites: List[int] = field(default_factory=list)
+    # How many scopes were open when this loop began, so a break or continue
+    # knows how many it is jumping out of and must release first.
+    scope_depth: int = 0
 
 
 @dataclass
@@ -78,6 +81,9 @@ class CodeGenVM:
         self.func_name_to_index: Dict[str, int] = {}
         # Enclosing loops, innermost last: break/continue bind to the last one.
         self._loops: List[LoopContext] = []
+        # Scopes currently open, outermost first. Used to release a scope's
+        # references when a break or continue leaves it early.
+        self._scopes: List[object] = []
 
     # -- string table ----------------------------------------------------
 
@@ -278,15 +284,14 @@ class CodeGenVM:
         elif isinstance(st, A.For):
             self._emit_for(st, layout, ctx)
         elif isinstance(st, A.Block):
-            # A block is only a scope, and scoping is already settled: sema gave
-            # its declarations their own symbols, so there is nothing to emit
-            # beyond the statements themselves.
-            for s in st.stmts:
-                self._emit_stmt(s, layout, ctx)
+            # A block is only a scope. Sema already gave its declarations their
+            # own symbols, so all that is left is the statements and releasing
+            # the references the scope declared.
+            self._emit_scoped_block(st.stmts, layout, ctx)
         elif isinstance(st, A.Break):
-            self._emit_loop_jump(st, "break")
+            self._emit_loop_jump(st, "break", layout, ctx)
         elif isinstance(st, A.Continue):
-            self._emit_loop_jump(st, "continue")
+            self._emit_loop_jump(st, "continue", layout, ctx)
         elif isinstance(st, A.VmAsm):
             self._emit_vm_asm(st, layout, ctx)
         else:
@@ -298,25 +303,59 @@ class CodeGenVM:
         self._emit_expr(st.cond, layout, ctx)
         jz_index = len(self.code)
         self.code.append(Instruction(OpCode.JZ, 0))  # arg to be patched
-        for s in st.then_block:
-            self._emit_stmt(s, layout, ctx)
+        self._emit_scoped_block(st.then_block, layout, ctx)
         # jump over else
         jmp_index = len(self.code)
         self.code.append(Instruction(OpCode.JMP, 0))
         # patch JZ to else start
         self.code[jz_index].arg = len(self.code)
         if st.else_block:
-            for s in st.else_block:
-                self._emit_stmt(s, layout, ctx)
+            self._emit_scoped_block(st.else_block, layout, ctx)
         self.code[jmp_index].arg = len(self.code)
 
-    def _emit_loop_jump(self, st: A.Stmt, kind: str):
+    def _release_scope(self, key, layout: FunctionLayout, ctx: Context):
+        """Store null into the reference slots a scope declared.
+
+        A name that has gone out of scope cannot be read again, so its slot
+        should stop rooting whatever it named. Without this the object survives
+        until the whole function returns, which for a loop body means the last
+        iteration's object outlives the loop entirely.
+
+        Clearing a slot only removes one root: an object still reachable
+        another way is unaffected. Sema records nothing for a scope with no
+        reference-typed declarations, so ordinary code emits no instructions.
+        """
+        for sym in ctx.scope_refs.get(id(key), ()):
+            slot = layout.slots.get(sym)
+            if slot is None:
+                continue
+            self.code.append(Instruction(OpCode.PUSH_INT, 0))
+            self.code.append(Instruction(OpCode.STORE_LOCAL, slot.index))
+
+    def _emit_scoped_block(self, stmts: List[A.Stmt], layout: FunctionLayout, ctx: Context):
+        """Emit a block's statements, then release the references it declared."""
+        self._scopes.append(stmts)
+        for s in stmts:
+            self._emit_stmt(s, layout, ctx)
+        self._scopes.pop()
+        self._release_scope(stmts, layout, ctx)
+
+    def _release_scopes_to(self, depth: int, layout: FunctionLayout, ctx: Context):
+        """Release every scope open beyond `depth`, innermost first."""
+        for key in reversed(self._scopes[depth:]):
+            self._release_scope(key, layout, ctx)
+
+    def _emit_loop_jump(self, st: A.Stmt, kind: str, layout: FunctionLayout, ctx: Context):
         """Emit the JMP for a break or continue, to be patched by its loop."""
         if not self._loops:
             # Sema rejects this already; reaching it means the two passes
             # disagree about what encloses this statement.
             raise CodegenError(f"[{st.line}:{st.col}] '{kind}' outside of a loop")
-        sites = self._loops[-1].break_sites if kind == "break" else self._loops[-1].continue_sites
+        loop = self._loops[-1]
+        # The jump skips the ends of every scope between here and the loop, so
+        # their references have to be released on the way out.
+        self._release_scopes_to(loop.scope_depth, layout, ctx)
+        sites = loop.break_sites if kind == "break" else loop.continue_sites
         sites.append(len(self.code))
         self.code.append(Instruction(OpCode.JMP, 0))  # arg to be patched
 
@@ -331,10 +370,9 @@ class CodeGenVM:
         self._emit_expr(st.cond, layout, ctx)
         jz_index = len(self.code)
         self.code.append(Instruction(OpCode.JZ, 0))
-        loop = LoopContext()
+        loop = LoopContext(scope_depth=len(self._scopes))
         self._loops.append(loop)
-        for s in st.body:
-            self._emit_stmt(s, layout, ctx)
+        self._emit_scoped_block(st.body, layout, ctx)
         self._loops.pop()
         self.code.append(Instruction(OpCode.JMP, loop_start))
         end_pc = len(self.code)
@@ -343,6 +381,8 @@ class CodeGenVM:
         self._patch_loop(loop, break_pc=end_pc, continue_pc=loop_start)
 
     def _emit_for(self, st: A.For, layout: FunctionLayout, ctx: Context):
+        # The init clause declares into a scope wrapping the whole loop.
+        self._scopes.append(st)
         if st.init is not None:
             self._emit_stmt(st.init, layout, ctx)
         loop_start = len(self.code)
@@ -351,10 +391,9 @@ class CodeGenVM:
             self._emit_expr(st.cond, layout, ctx)
             jz_index = len(self.code)
             self.code.append(Instruction(OpCode.JZ, 0))
-        loop = LoopContext()
+        loop = LoopContext(scope_depth=len(self._scopes))
         self._loops.append(loop)
-        for s in st.body:
-            self._emit_stmt(s, layout, ctx)
+        self._emit_scoped_block(st.body, layout, ctx)
         self._loops.pop()
         # `continue` lands on the step, not on the condition, so skipping the
         # rest of an iteration still advances the loop.
@@ -367,6 +406,11 @@ class CodeGenVM:
             self.code[jz_index].arg = end_pc
         # With no condition there is no JZ to patch: the only way out is `break`.
         self._patch_loop(loop, break_pc=end_pc, continue_pc=step_pc)
+        # The init clause's scope wraps the whole loop, so it is released once
+        # here rather than on each iteration. Both the condition-false path and
+        # every break land on end_pc, just above this.
+        self._scopes.pop()
+        self._release_scope(st, layout, ctx)
 
     def _emit_vm_asm(self, vm_asm: A.VmAsm, layout: FunctionLayout, ctx: Context) -> None:
         """Lower a vm_asm inline block into VM bytecode.

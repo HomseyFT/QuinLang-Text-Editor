@@ -148,6 +148,12 @@ class Context:
         # id(VmAsm) -> names visible at that block, since its body is raw text
         # that no other pass resolves.
         self.asm_scope: Dict[int, Dict[str, Symbol]] = {}
+        # Statement list (or For node) -> the reference-typed symbols the scope
+        # it introduces declares directly. Codegen uses this to release those
+        # slots when the scope ends, so an out-of-scope variable stops rooting
+        # its object. Codegen never walks scopes itself, which is what keeps
+        # the two passes from disagreeing about what a name means.
+        self.scope_refs: Dict[int, List[Symbol]] = {}
         # Non-fatal diagnostics. Sema is the only pass that raises one today,
         # but codegen already receives this Context, so it can add its own
         # without any structural change.
@@ -392,10 +398,12 @@ class SemanticAnalyzer:
             then_scope = Scope(scope)
             for s in st.then_block:
                 self._analyze_stmt(s, then_scope, ret_type)
+            self._record_scope_refs(st.then_block, then_scope)
             if st.else_block:
                 else_scope = Scope(scope)
                 for s in st.else_block:
                     self._analyze_stmt(s, else_scope, ret_type)
+                self._record_scope_refs(st.else_block, else_scope)
         elif isinstance(st, A.While):
             cond_t = self._analyze_expr(st.cond, scope)
             if cond_t != Bool:
@@ -405,6 +413,7 @@ class SemanticAnalyzer:
             for s in st.body:
                 self._analyze_stmt(s, body_scope, ret_type)
             self._loop_depth -= 1
+            self._record_scope_refs(st.body, body_scope)
         elif isinstance(st, A.For):
             # The init clause declares into a scope wrapping the loop, so the
             # loop variable is visible to cond/step/body and nowhere else.
@@ -422,10 +431,15 @@ class SemanticAnalyzer:
             for s in st.body:
                 self._analyze_stmt(s, body_scope, ret_type)
             self._loop_depth -= 1
+            self._record_scope_refs(st.body, body_scope)
+            # The init clause's scope wraps the whole loop, so it is released
+            # once the loop is done rather than on each iteration.
+            self._record_scope_refs(st, loop_scope)
         elif isinstance(st, A.Block):
             block_scope = Scope(scope)
             for s in st.stmts:
                 self._analyze_stmt(s, block_scope, ret_type)
+            self._record_scope_refs(st.stmts, block_scope)
         elif isinstance(st, A.Break):
             if self._loop_depth == 0:
                 raise SemanticError("'break' outside of a loop", st.line, st.col)
@@ -442,6 +456,17 @@ class SemanticAnalyzer:
         else:
             # Ignore blocks etc.
             pass
+
+    def _record_scope_refs(self, key, scope: Scope):
+        """Note the references a scope declares, for codegen to release.
+
+        Scope.vars holds exactly the names declared directly in this scope, in
+        declaration order. A scope that declares no references records nothing,
+        so ordinary code costs no instructions.
+        """
+        refs = [sym for sym in scope.vars.values() if is_reference_type(sym.type)]
+        if refs:
+            self.ctx.scope_refs[id(key)] = refs
 
     def _check_exit_code(self, value: A.Expr):
         """Warn when main returns a constant the exit code cannot represent.
