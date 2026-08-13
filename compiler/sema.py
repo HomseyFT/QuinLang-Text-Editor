@@ -580,6 +580,10 @@ class SemanticAnalyzer:
             lt = self._analyze_expr(e.left, scope)
             rt = self._analyze_expr(e.right, scope)
             if e.op in ('+', '-', '*', '/'):
+                # String concatenation, which builds a new string.
+                if e.op == '+' and lt == Str and rt == Str:
+                    self.ctx.set_type(e, Str)
+                    return Str
                 # Heap pointer arithmetic: allow heapptr +/- int, and heapptr - heapptr.
                 if e.op == '+':
                     if (lt == HeapPtr and rt == Int) or (lt == Int and rt == HeapPtr):

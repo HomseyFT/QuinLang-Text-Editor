@@ -31,10 +31,16 @@ class OpCode(Enum):
     CMP_GT = auto()
     CMP_GE = auto()
 
-    # Pop two string ids, push -1, 0, or 1 by content order. The comparison
-    # opcodes above then compare that against zero, so all six operators work
-    # through one instruction.
-    STR_CMP = auto()
+    # Strings. A str value is the heap address of a string object, so these
+    # read and build objects rather than indexing a host-side table.
+    LOAD_STR = auto()      # operand: literal id; push that literal's address
+    STR_CMP = auto()       # pop two strings, push -1, 0 or 1 by content order
+    STR_LEN = auto()       # pop a string, push its length
+    STR_CHAR_AT = auto()   # pop index and string, push the character code
+    STR_CONCAT = auto()    # pop two strings, push a new one
+    STR_SLICE = auto()     # pop end, start and string, push a new one
+    STR_FROM_INT = auto()  # pop an int, push its decimal text
+    STR_FROM_CHAR = auto() # pop a character code, push a one-character string
 
     # Logical
     NOT = auto()

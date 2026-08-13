@@ -28,6 +28,7 @@ HEAP_START = NULL_ADDR + 2  # leave address 0 reserved for null
 
 KIND_STRUCT = 0  # detail is a struct type id; trace its reference fields
 KIND_RAW = 1     # detail is a byte size; reachable, reclaimable, never traced
+KIND_STRING = 2  # detail is a byte length; the bytes follow, never traced
 MARK_BIT = 0x8000
 
 # There is no free-block kind: the collector slides live objects together, so
@@ -143,10 +144,14 @@ class QuinVM:
         # after a collection there are no holes to describe.
         self.heap_ptr: int = HEAP_START
         self.stats = HeapStats()
+        # Literal id -> the heap address of its string object, filled in by
+        # _materialise_literals when the program starts.
+        self.literals: List[int] = []
 
     def run_main(self) -> int:
         if "main" not in self.func_index:
             raise VMError("No 'main' function defined")
+        self._materialise_literals()
         idx = self.func_index["main"]
         fn = self.functions[idx]
         self.locals = [0] * fn.num_locals
@@ -190,11 +195,6 @@ class QuinVM:
             )
         self.locals[index] = value & WORD_MASK
 
-    def _string(self, sid: int) -> str:
-        if sid not in self.strings:
-            raise VMError(f"Unknown string id {sid} at pc={self.pc - 1}")
-        return self.strings[sid]
-
     # -- object headers --------------------------------------------------
     #
     # Addresses below are header addresses unless named `ref`. A reference the
@@ -221,6 +221,11 @@ class QuinVM:
             if type_id >= len(self.structs):
                 raise VMError(f"Corrupt heap: object at {hdr} has unknown type id {type_id}")
             return max(self.structs[type_id].word_size * 2, MIN_PAYLOAD)
+        if kind == KIND_STRING:
+            # detail is the true character count; the block is rounded up so
+            # that the next header stays word-aligned.
+            n = self._detail(hdr)
+            return max(n + (n & 1), MIN_PAYLOAD)
         return self._detail(hdr)
 
     def _block_end(self, hdr: int) -> int:
@@ -290,6 +295,53 @@ class QuinVM:
             self._write_word(addr + off, 0)
         return addr
 
+    # -- strings ---------------------------------------------------------
+    #
+    # A string is a heap object: a header carrying its length in characters,
+    # then the characters themselves, one byte each. It holds no references, so
+    # the collector keeps it alive but never traces into it -- the same deal as
+    # a block from alloc().
+
+    def _alloc_string(self, data: bytes) -> int:
+        length = len(data)
+        if length > 0x7FFF:
+            raise VMError(f"String of {length} characters is too long")
+        addr = self._reserve(length, KIND_STRING, length)
+        self.heap[addr:addr + length] = data
+        # Pad so the rounding byte is never stale.
+        if length & 1:
+            self.heap[addr + length] = 0
+        return addr
+
+    def _string_bytes(self, addr: int) -> bytes:
+        """The characters of the string object at `addr`."""
+        if addr == NULL_ADDR:
+            raise VMError("Null pointer dereference on a string")
+        hdr = addr - HEADER_BYTES
+        if hdr < HEAP_START or self._kind(hdr) != KIND_STRING:
+            raise VMError(f"Value at {addr} is not a string")
+        return bytes(self.heap[addr:addr + self._detail(hdr)])
+
+    def _string_text(self, addr: int) -> str:
+        return self._string_bytes(addr).decode("latin-1")
+
+    def _materialise_literals(self):
+        """Copy every literal into the heap before the program starts.
+
+        Their addresses are permanent roots: a literal is reachable from the
+        bytecode rather than from any variable, so nothing else would keep it
+        alive. Compaction rewrites this list like any other root.
+        """
+        count = (max(self.strings) + 1) if self.strings else 0
+        self.literals = [NULL_ADDR] * count
+        for sid, text in self.strings.items():
+            self.literals[sid] = self._alloc_string(text.encode("latin-1"))
+
+    def _literal(self, sid: int) -> int:
+        if sid < 0 or sid >= len(self.literals):
+            raise VMError(f"Unknown string id {sid} at pc={self.pc - 1}")
+        return self.literals[sid]
+
     # -- collection ------------------------------------------------------
 
     def collect(self):
@@ -337,6 +389,11 @@ class QuinVM:
         for value, is_ref in zip(self.stack, self.stack_is_ref):
             if is_ref and value != NULL_ADDR:
                 yield value
+        # String literals live in the heap but are named by the bytecode, not
+        # by any variable, so they are roots for the whole run.
+        for addr in self.literals:
+            if addr != NULL_ADDR:
+                yield addr
 
     def _containing_object(self, ref: int, starts: List[int]):
         """The payload address of the block containing `ref`, or None."""
@@ -417,6 +474,13 @@ class QuinVM:
         for i, is_ref in enumerate(self.stack_is_ref):
             if is_ref:
                 self.stack[i] = moved(self.stack[i])
+
+        # Literals do not move today: they are materialised first, so they
+        # occupy the bottom of the heap, and being permanent roots they never
+        # die, so compaction always finds them already in place. This keeps
+        # that from being a silent assumption if materialisation ever changes.
+        for i, addr in enumerate(self.literals):
+            self.literals[i] = moved(addr)
 
         for hdr in self._blocks():
             if not self._is_marked(hdr) or self._kind(hdr) != KIND_STRUCT:
@@ -589,12 +653,58 @@ class QuinVM:
                     res = a >= b
                 self._push(int(res))
 
+            elif op is OpCode.LOAD_STR:
+                self._push(self._literal(int(arg)), True)
+
             elif op is OpCode.STR_CMP:
-                b = self._string(self._pop())
-                a = self._string(self._pop())
+                b = self._string_bytes(self._pop())
+                a = self._string_bytes(self._pop())
                 # A plain int, not a reference: the collector must not treat
                 # this as a heap address.
                 self._push(0 if a == b else (1 if a > b else -1))
+
+            elif op is OpCode.STR_LEN:
+                self._push(len(self._string_bytes(self._pop())))
+
+            elif op is OpCode.STR_CHAR_AT:
+                index = to_signed(self._pop())
+                data = self._string_bytes(self._pop())
+                if index < 0 or index >= len(data):
+                    raise VMError(
+                        f"str_char_at index out of range: index={index}, "
+                        f"length={len(data)}"
+                    )
+                self._push(data[index])
+
+            elif op is OpCode.STR_CONCAT:
+                # Read both before allocating: the allocation may collect and
+                # move them, and these are plain host-side copies.
+                right = self._string_bytes(self._pop())
+                left = self._string_bytes(self._pop())
+                self._push(self._alloc_string(left + right), True)
+
+            elif op is OpCode.STR_SLICE:
+                end = to_signed(self._pop())
+                start = to_signed(self._pop())
+                data = self._string_bytes(self._pop())
+                if start < 0 or end > len(data) or start > end:
+                    raise VMError(
+                        f"str_slice range out of bounds: start={start}, "
+                        f"end={end}, length={len(data)}"
+                    )
+                self._push(self._alloc_string(data[start:end]), True)
+
+            elif op is OpCode.STR_FROM_INT:
+                self._push(self._alloc_string(
+                    str(to_signed(self._pop())).encode("latin-1")), True)
+
+            elif op is OpCode.STR_FROM_CHAR:
+                # Not named `code`: that is the bytecode list this loop reads.
+                char_code = to_signed(self._pop())
+                if char_code < 0 or char_code > 255:
+                    raise VMError(
+                        f"char_to_str expects a code in 0..255, got {char_code}")
+                self._push(self._alloc_string(bytes([char_code])), True)
 
             elif op is OpCode.NOT:
                 self._push(0 if self._pop() else 1)
@@ -718,13 +828,13 @@ class QuinVM:
                 print(to_signed(self._pop()), end="")
 
             elif op is OpCode.PRINT_STR:
-                print(self._string(self._pop()), end="")
+                print(self._string_text(self._pop()), end="")
 
             elif op is OpCode.PRINTLN_INT:
                 print(to_signed(self._pop()))
 
             elif op is OpCode.PRINTLN_STR:
-                print(self._string(self._pop()))
+                print(self._string_text(self._pop()))
 
             elif op is OpCode.ALLOC:
                 self._push(self._alloc_raw(to_signed(self._pop())), True)
@@ -733,7 +843,7 @@ class QuinVM:
                 self.collect()
 
             elif op is OpCode.PANIC:
-                raise VMError(self._string(self._pop()))
+                raise VMError(self._string_text(self._pop()))
 
             elif op is OpCode.ALLOC_TYPED:
                 self._push(self._alloc_struct(int(arg)), True)

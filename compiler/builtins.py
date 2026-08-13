@@ -36,4 +36,10 @@ def get_builtins() -> Dict[str, BuiltinSig]:
         # problem, so a library function given bad arguments has no way to
         # complain without this.
         "panic":      (["str"], "void"),
+        # Strings. Concatenation is the '+' operator rather than a builtin.
+        "str_len":     (["str"], "int"),
+        "str_char_at": (["str", "int"], "int"),
+        "str_slice":   (["str", "int", "int"], "str"),
+        "int_to_str":  (["int"], "str"),
+        "char_to_str": (["int"], "str"),
     }

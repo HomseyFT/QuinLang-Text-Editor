@@ -95,7 +95,21 @@ def is_struct_type(t: Type) -> bool:
 
 
 def is_reference_type(t: Type) -> bool:
-    """Whether values of this type are heap addresses the GC must trace."""
+    """Whether values of this type are heap addresses the GC must trace.
+
+    A str is one of these: a string is a heap object, so a str slot roots it
+    and a str field inside a struct has to be traced.
+    """
+    return is_struct_type(t) or t == HeapPtr or t == Str
+
+
+def is_nullable(t: Type) -> bool:
+    """Whether null may stand in for a value of this type.
+
+    Not the same question as is_reference_type. A string is a heap reference,
+    but there is no null string: an uninitialised str is the empty string, so
+    every str denotes real characters and no operation needs a null check.
+    """
     return is_struct_type(t) or t == HeapPtr
 
 
@@ -107,15 +121,15 @@ def assignable(target: Type, value: Type) -> bool:
     """
     if target == value:
         return True
-    return value == Null and is_reference_type(target)
+    return value == Null and is_nullable(target)
 
 
 def comparable(left: Type, right: Type) -> bool:
     """Whether == and != accept this pair of operand types."""
     if left == right:
         return True
-    return ((left == Null and is_reference_type(right))
-            or (right == Null and is_reference_type(left)))
+    return ((left == Null and is_nullable(right))
+            or (right == Null and is_nullable(left)))
 
 
 class UnknownTypeError(Exception):

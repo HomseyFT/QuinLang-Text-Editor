@@ -1,6 +1,19 @@
 from typing import List
 from .tokens import Token, TokenType, KEYWORDS
 
+# What a backslash may introduce inside a string literal. Anything else is an
+# error rather than a silently preserved backslash: a typo in an escape should
+# not turn into two characters nobody asked for.
+ESCAPES = {
+    'n': '\n',
+    't': '\t',
+    'r': '\r',
+    '0': '\0',
+    '\\': '\\',
+    '"': '"',
+}
+
+
 class LexError(Exception):
     def __init__(self, message: str, line: int, col: int):
         super().__init__(message)
@@ -146,6 +159,20 @@ class Lexer:
             if ch == '\n':
                 self.line += 1
                 self.col = 1
+            if ch == '\\':
+                if self._is_at_end():
+                    break  # the unterminated check below reports this
+                esc = self._advance()
+                if esc == '\n':
+                    self.line += 1
+                    self.col = 1
+                if esc not in ESCAPES:
+                    raise LexError(
+                        f"Unknown escape sequence '\\{esc}' in string literal",
+                        self.line, self.col - 2,
+                    )
+                value_chars.append(ESCAPES[esc])
+                continue
             value_chars.append(ch)
         if self._is_at_end():
             raise LexError("Unterminated string literal", open_line, open_col)

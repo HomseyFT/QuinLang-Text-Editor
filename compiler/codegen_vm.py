@@ -218,6 +218,10 @@ class CodeGenVM:
                 # already point at the outer symbol.
                 if st.init is not None:
                     self._emit_expr(st.init, layout, ctx)
+                elif ctx.binding_of(st) is not None and ctx.binding_of(st).type == Str:
+                    # Zero would be the null address. A str has no null, so an
+                    # uninitialised one is the empty string.
+                    self.code.append(Instruction(OpCode.LOAD_STR, self._add_string("")))
                 else:
                     self.code.append(Instruction(OpCode.PUSH_INT, 0))
                 self.code.append(Instruction(OpCode.STORE_LOCAL, slot.index))
@@ -496,11 +500,11 @@ class CodeGenVM:
         false_sid = self._add_string("false")
         jz_idx = len(self.code)
         self.code.append(Instruction(OpCode.JZ, 0))  # placeholder
-        self.code.append(Instruction(OpCode.PUSH_INT, true_sid))
+        self.code.append(Instruction(OpCode.LOAD_STR, true_sid))
         jmp_idx = len(self.code)
         self.code.append(Instruction(OpCode.JMP, 0))  # placeholder
         false_pc = len(self.code)
-        self.code.append(Instruction(OpCode.PUSH_INT, false_sid))
+        self.code.append(Instruction(OpCode.LOAD_STR, false_sid))
         self.code[jz_idx].arg = false_pc
         self.code[jmp_idx].arg = len(self.code)
 
@@ -515,7 +519,9 @@ class CodeGenVM:
             elif isinstance(e.value, int):
                 self.code.append(Instruction(OpCode.PUSH_INT, e.value & 0xFFFF))
             elif isinstance(e.value, str):
-                self.code.append(Instruction(OpCode.PUSH_INT, self._add_string(e.value)))
+                # A str value is the heap address of a string object, which
+                # only exists once the VM has materialised the literal table.
+                self.code.append(Instruction(OpCode.LOAD_STR, self._add_string(e.value)))
             else:
                 raise CodegenError(
                     f"[{e.line}:{e.col}] Unsupported literal {e.value!r}"
@@ -664,6 +670,9 @@ class CodeGenVM:
             raise CodegenError(f"[{e.line}:{e.col}] Unknown binary operator '{e.op}'")
         self._emit_expr(e.left, layout, ctx)
         self._emit_expr(e.right, layout, ctx)
+        if e.op == '+' and ctx.get_type(e.left) == Str:
+            self.code.append(Instruction(OpCode.STR_CONCAT))
+            return
         if e.op in COMPARISONS and ctx.get_type(e.left) == Str:
             # Strings are held as interned ids, and comparing ids would order
             # them by whichever literal the compiler happened to see first.
@@ -759,6 +768,19 @@ class CodeGenVM:
         if name == "heap_load" and len(e.args) == 1:
             self._emit_expr(e.args[0], layout, ctx)
             self.code.append(Instruction(OpCode.HEAP_LOAD))
+            return
+        string_ops = {
+            ("str_len", 1): OpCode.STR_LEN,
+            ("str_char_at", 2): OpCode.STR_CHAR_AT,
+            ("str_slice", 3): OpCode.STR_SLICE,
+            ("int_to_str", 1): OpCode.STR_FROM_INT,
+            ("char_to_str", 1): OpCode.STR_FROM_CHAR,
+        }
+        op = string_ops.get((name, len(e.args)))
+        if op is not None:
+            for arg_expr in e.args:
+                self._emit_expr(arg_expr, layout, ctx)
+            self.code.append(Instruction(op))
             return
         if name == "panic" and len(e.args) == 1:
             self._emit_expr(e.args[0], layout, ctx)
