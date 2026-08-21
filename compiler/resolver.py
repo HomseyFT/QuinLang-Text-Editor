@@ -1,12 +1,6 @@
-"""
-Import resolution for QuinLang.
-
-This module handles:
-1. Path resolution (relative paths, std library lookup)
-2. Recursive parsing of included files
-3. Cycle detection
-4. AST merging
-"""
+"""Include resolution: parse included files recursively and merge them into
+one Program. Each file is resolved once, so a repeat or a cycle collapses to a
+single copy rather than being reported as an error."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,49 +12,26 @@ from .parser import Parser, ParseError
 
 
 class ResolveError(Exception):
-    """Raised when import resolution fails."""
     pass
 
 
 @dataclass
 class ResolvedProgram:
-    """Result of resolving all includes for a program."""
-    program: A.Program  # Merged program with all functions
-    source_files: List[Path]  # All files that were included (for error reporting)
+    program: A.Program
+    source_files: List[Path]  # in inclusion order, for error reporting
 
 
 class ImportResolver:
-    """
-    Resolves include statements by recursively parsing imported files
-    and merging their functions into a single program.
-    """
-
     def __init__(self, std_path: Path):
-        """
-        Args:
-            std_path: Path to the standard library directory (e.g., project/std/)
-        """
         self.std_path = std_path
-        self.included: Set[Path] = set()  # Track resolved absolute paths (prevents cycles/duplicates)
-        self.source_files: List[Path] = []  # Order of inclusion
+        self.included: Set[Path] = set()  # absolute paths; collapses cycles and repeats
+        self.source_files: List[Path] = []
         self.all_functions: List[A.Function] = []
-        self.function_origins: Dict[str, Path] = {}  # Track where each function was defined
+        self.function_origins: Dict[str, Path] = {}
         self.all_structs: List[A.StructDef] = []
-        self.struct_origins: Dict[str, Path] = {}  # Track where each struct was defined
+        self.struct_origins: Dict[str, Path] = {}
 
     def resolve(self, entry_file: Path) -> ResolvedProgram:
-        """
-        Recursively resolve all includes starting from entry_file.
-
-        Args:
-            entry_file: The main source file to compile
-
-        Returns:
-            ResolvedProgram with all functions merged
-
-        Raises:
-            ResolveError: If a file cannot be found or there's a parsing error
-        """
         self.included.clear()
         self.source_files.clear()
         self.all_functions.clear()
@@ -70,25 +41,16 @@ class ImportResolver:
 
         self._resolve_file(entry_file.resolve())
 
-        # Create merged program (no includes in the merged result)
         merged = A.Program(includes=[], functions=self.all_functions,
                            structs=self.all_structs)
         return ResolvedProgram(program=merged, source_files=self.source_files)
 
     def _resolve_file(self, file_path: Path) -> None:
-        """
-        Parse a file and recursively resolve its includes.
-
-        Args:
-            file_path: Absolute path to the file to resolve
-        """
-        # Cycle/duplicate detection
         if file_path in self.included:
             return
         self.included.add(file_path)
         self.source_files.append(file_path)
 
-        # Read and parse the file
         if not file_path.exists():
             raise ResolveError(f"Cannot find file: {file_path}")
 
@@ -103,13 +65,14 @@ class ImportResolver:
         except (LexError, ParseError) as e:
             raise ResolveError(f"Syntax error in {file_path}:{e.line}:{e.col}: {e}")
 
-        # Recursively resolve includes first (depth-first)
+        # Depth-first, so a file's dependencies land in the merged program
+        # ahead of the file itself.
         for inc in program.includes:
             inc_path = self._resolve_path(inc.path, file_path)
             self._resolve_file(inc_path)
 
-        # Add structs from this file, on the same terms as functions: a name may
-        # only be defined once across the whole merged program.
+        # Structs and functions share one rule: a name may only be defined
+        # once across the whole merged program.
         for sd in program.structs:
             if sd.name in self.struct_origins:
                 orig = self.struct_origins[sd.name]
@@ -120,7 +83,6 @@ class ImportResolver:
             self.struct_origins[sd.name] = file_path
             self.all_structs.append(sd)
 
-        # Add functions from this file (after includes, so dependencies come first)
         for fn in program.functions:
             if fn.name in self.function_origins:
                 orig = self.function_origins[fn.name]
@@ -132,25 +94,10 @@ class ImportResolver:
             self.all_functions.append(fn)
 
     def _resolve_path(self, include_path: str, relative_to: Path) -> Path:
-        """
-        Convert an include path to an absolute path.
-
-        Resolution rules:
-        - "std/..." -> resolve from std_path
-        - "./..." or "../..." -> resolve relative to the including file
-        - Other paths -> resolve relative to the including file
-
-        Args:
-            include_path: The path string from the include statement
-            relative_to: The absolute path of the file containing the include
-
-        Returns:
-            Absolute path to the included file
-        """
-        # Standard library paths
+        """A 'std/' prefix resolves against the standard library; every other
+        path resolves relative to the file containing the include."""
         if include_path.startswith("std/"):
             return (self.std_path / include_path[4:]).resolve()
 
-        # Relative paths (resolve relative to the including file's directory)
         base_dir = relative_to.parent
         return (base_dir / include_path).resolve()

@@ -6,9 +6,9 @@ from typing import List, Union
 
 class OpCode(Enum):
     # Stack and locals
-    PUSH_INT = auto()      # operand: int literal
-    LOAD_LOCAL = auto()    # operand: local index
-    STORE_LOCAL = auto()   # operand: local index
+    PUSH_INT = auto()
+    LOAD_LOCAL = auto()
+    STORE_LOCAL = auto()
 
     # Arithmetic
     ADD = auto()
@@ -33,14 +33,14 @@ class OpCode(Enum):
 
     # Strings. A str value is the heap address of a string object, so these
     # read and build objects rather than indexing a host-side table.
-    LOAD_STR = auto()      # operand: literal id; push that literal's address
-    STR_CMP = auto()       # pop two strings, push -1, 0 or 1 by content order
-    STR_LEN = auto()       # pop a string, push its length
-    STR_CHAR_AT = auto()   # pop index and string, push the character code
-    STR_CONCAT = auto()    # pop two strings, push a new one
-    STR_SLICE = auto()     # pop end, start and string, push a new one
-    STR_FROM_INT = auto()  # pop an int, push its decimal text
-    STR_FROM_CHAR = auto() # pop a character code, push a one-character string
+    LOAD_STR = auto()      # operand: literal id
+    STR_CMP = auto()       # push -1, 0 or 1 by content order
+    STR_LEN = auto()
+    STR_CHAR_AT = auto()   # pop index, then string
+    STR_CONCAT = auto()
+    STR_SLICE = auto()     # pop end, then start, then string
+    STR_FROM_INT = auto()  # decimal text
+    STR_FROM_CHAR = auto()
 
     # Logical
     NOT = auto()
@@ -48,28 +48,28 @@ class OpCode(Enum):
 
     # Control flow
     JMP = auto()           # operand: target pc
-    JZ = auto()            # operand: target pc (pop value; jump if zero)
-    JNZ = auto()           # operand: target pc (pop value; jump if nonzero)
+    JZ = auto()            # operand: target pc; pops the value it tests
+    JNZ = auto()           # operand: target pc; pops the value it tests
 
     # Function calls
     CALL = auto()          # operand: function index
     RET = auto()
 
     # Arrays as locals: base index is encoded in operand
-    LOAD_LOCAL_IDX = auto()    # operand: base local index
-    STORE_LOCAL_IDX = auto()   # operand: base local index
-    BOUNDS_CHECK = auto()      # operand: array element count; inspects index on top of stack without popping it
+    LOAD_LOCAL_IDX = auto()
+    STORE_LOCAL_IDX = auto()
+    BOUNDS_CHECK = auto()      # operand: element count; inspects the index without popping it
 
     # Indirect access using "pointer" as local index
     LOAD_INDIRECT = auto()     # pop p; push locals[p]
     STORE_INDIRECT = auto()    # pop v, pop p; locals[p] = v
-    MEMCPY_LOCALS = auto()     # pop count, src, dst; copy locals
-    MEMSET_LOCALS = auto()     # pop count, value, dst; fill locals
+    MEMCPY_LOCALS = auto()     # pop count, src, dst
+    MEMSET_LOCALS = auto()     # pop count, value, dst
 
     # Stack management
     POP = auto()
-    DUP = auto()           # push a copy of the top of stack
-    SWAP = auto()          # exchange the top two stack entries
+    DUP = auto()
+    SWAP = auto()
 
     # Builtin-style I/O
     PRINT_INT = auto()
@@ -78,16 +78,16 @@ class OpCode(Enum):
     PRINTLN_STR = auto()
 
     # Heap operations
-    ALLOC = auto()             # pop size in bytes; allocate an untyped block
-    ALLOC_TYPED = auto()       # operand: struct type id; allocate that struct
+    ALLOC = auto()             # pop size in bytes
+    ALLOC_TYPED = auto()       # operand: struct type id
     HEAP_LOAD = auto()
     HEAP_STORE = auto()
-    # Field access. The offset is an operand rather than an ADD on the address,
-    # so the null check tests the object reference itself: adding first would
-    # turn a null base into a small non-zero address and read whatever is there.
-    HEAP_LOAD_FIELD = auto()   # operand: word offset; pop ref, push field
+    # The field offset is an operand rather than an ADD on the address, so the
+    # null check tests the object reference itself: adding first would turn a
+    # null base into a small non-zero address and read whatever is there.
+    HEAP_LOAD_FIELD = auto()   # operand: word offset; pop ref
     HEAP_STORE_FIELD = auto()  # operand: word offset; pop value, pop ref
-    GC = auto()                # force a collection
+    GC = auto()
     PANIC = auto()             # pop a message id and stop the program
 
 

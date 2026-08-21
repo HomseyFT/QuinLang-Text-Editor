@@ -11,13 +11,9 @@ COMPARISONS = ("==", "!=", "<", "<=", ">", ">=")
 
 
 class CodegenError(Exception):
-    """Raised when the AST cannot be lowered to bytecode.
-
-    Most of these indicate a hole in semantic analysis rather than a user
-    error: by the time codegen runs, names and types are supposed to be
-    resolved. Failing loudly here beats emitting code that quietly computes
-    the wrong answer.
-    """
+    """Usually a hole in semantic analysis rather than a user error: by the
+    time codegen runs, names and types are supposed to be resolved. Failing
+    loudly beats emitting code that quietly computes the wrong answer."""
 
 
 @dataclass
@@ -77,7 +73,6 @@ class CodeGenVM:
         self.functions: List[FunctionLayout] = []
         self.strings: Dict[int, str] = {}
         self._string_ids: Dict[str, int] = {}
-        # map function name -> index used in CALL opcode
         self.func_name_to_index: Dict[str, int] = {}
         # Enclosing loops, innermost last: break/continue bind to the last one.
         self._loops: List[LoopContext] = []
@@ -88,11 +83,8 @@ class CodeGenVM:
     # -- string table ----------------------------------------------------
 
     def _add_string(self, value: str) -> int:
-        """Intern a string literal, returning its id.
-
-        Interning keeps the table from growing per call site and makes string
-        equality (which compares ids) behave sanely.
-        """
+        """Intern a string literal, returning its id, so the table does not
+        grow per call site."""
         if value in self._string_ids:
             return self._string_ids[value]
         sid = len(self._string_ids)
@@ -166,10 +158,9 @@ class CodeGenVM:
     def _build_layout(self, fn: A.Function, ctx: Context) -> FunctionLayout:
         """Give every symbol sema found in this frame its own slot.
 
-        Sema lists parameters first, which the calling convention requires:
-        CALL drops arguments into the callee's leading locals. Slots are never
-        reused across sibling scopes, so two declarations of the same name
-        cannot collide.
+        Parameters come first because CALL drops arguments into the callee's
+        leading locals. Slots are never reused across sibling scopes, so two
+        declarations of the same name cannot collide.
         """
         symbols = ctx.frame_symbols.get(fn.name)
         if symbols is None:
@@ -288,9 +279,8 @@ class CodeGenVM:
         elif isinstance(st, A.For):
             self._emit_for(st, layout, ctx)
         elif isinstance(st, A.Block):
-            # A block is only a scope. Sema already gave its declarations their
-            # own symbols, so all that is left is the statements and releasing
-            # the references the scope declared.
+            # A block is only a scope: sema already gave its declarations their
+            # own symbols, so all that is left is emitting and releasing.
             self._emit_scoped_block(st.stmts, layout, ctx)
         elif isinstance(st, A.Break):
             self._emit_loop_jump(st, "break", layout, ctx)
@@ -308,26 +298,20 @@ class CodeGenVM:
         jz_index = len(self.code)
         self.code.append(Instruction(OpCode.JZ, 0))  # arg to be patched
         self._emit_scoped_block(st.then_block, layout, ctx)
-        # jump over else
         jmp_index = len(self.code)
         self.code.append(Instruction(OpCode.JMP, 0))
-        # patch JZ to else start
         self.code[jz_index].arg = len(self.code)
         if st.else_block:
             self._emit_scoped_block(st.else_block, layout, ctx)
         self.code[jmp_index].arg = len(self.code)
 
     def _release_scope(self, key, layout: FunctionLayout, ctx: Context):
-        """Store null into the reference slots a scope declared.
+        """Store null into the reference slots a scope declared, so a name that
+        has gone out of scope stops rooting whatever it named. Without this a
+        loop body's last object outlives the loop entirely.
 
-        A name that has gone out of scope cannot be read again, so its slot
-        should stop rooting whatever it named. Without this the object survives
-        until the whole function returns, which for a loop body means the last
-        iteration's object outlives the loop entirely.
-
-        Clearing a slot only removes one root: an object still reachable
-        another way is unaffected. Sema records nothing for a scope with no
-        reference-typed declarations, so ordinary code emits no instructions.
+        This only removes one root; an object reachable another way is
+        unaffected.
         """
         for sym in ctx.scope_refs.get(id(key), ()):
             slot = layout.slots.get(sym)
@@ -417,20 +401,12 @@ class CodeGenVM:
         self._release_scope(st, layout, ctx)
 
     def _emit_vm_asm(self, vm_asm: A.VmAsm, layout: FunctionLayout, ctx: Context) -> None:
-        """Lower a vm_asm inline block into VM bytecode.
+        """Lower a vm_asm block to bytecode. The accepted instructions are
+        `push_int` plus the simple_ops and local_ops tables below; anything
+        else is an error.
 
-        Supported v1 instructions (line-based, each ending with ';'):
-          - push_int N;
-          - load_local NAME;
-          - store_local NAME;
-          - add; sub; mul; div; neg; not;
-          - cmp_eq; cmp_ne; cmp_lt; cmp_le; cmp_gt; cmp_ge;
-
-        Lines are parsed by splitting on whitespace; semicolons are kept by the
-        parser but are not semantically significant here.
-
-        The body is raw text, so sema cannot resolve its names as it walks
-        expressions. Instead it records the scope in effect at this block, and
+        The body is raw text, so sema cannot resolve its names while walking
+        expressions. It records the scope in effect at this block instead, and
         NAME is looked up there.
         """
         visible = ctx.asm_scope.get(id(vm_asm))
@@ -674,14 +650,13 @@ class CodeGenVM:
             self.code.append(Instruction(OpCode.STR_CONCAT))
             return
         if e.op in COMPARISONS and ctx.get_type(e.left) == Str:
-            # Strings are held as interned ids, and comparing ids would order
-            # them by whichever literal the compiler happened to see first.
-            # STR_CMP reduces the pair to -1/0/1, which the ordinary comparison
-            # opcode then tests against zero -- so all six operators come out
-            # comparing content, through one extra instruction.
+            # Comparing interned ids would order strings by whichever literal
+            # the compiler saw first. STR_CMP reduces the pair to -1/0/1, which
+            # the ordinary comparison opcode tests against zero, so all six
+            # operators compare content for one extra instruction.
             #
-            # The VM has to be told, rather than working it out: the operand
-            # stack is untyped words, so at run time a string id is
+            # Codegen has to emit this rather than the VM inferring it: the
+            # operand stack is untyped words, so at run time a string id is
             # indistinguishable from an int.
             self.code.append(Instruction(OpCode.STR_CMP))
             self.code.append(Instruction(OpCode.PUSH_INT, 0))
@@ -801,7 +776,6 @@ class CodeGenVM:
             self.code.append(Instruction(OpCode.PUSH_INT, 0))  # void result
             return
 
-        # Regular user-defined call: evaluate args left to right, then CALL.
         if name not in self.func_name_to_index:
             raise CodegenError(f"[{e.line}:{e.col}] Call to unknown function '{name}'")
         for arg_expr in e.args:

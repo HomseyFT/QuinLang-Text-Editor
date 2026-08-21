@@ -1,9 +1,8 @@
 from typing import List
 from .tokens import Token, TokenType, KEYWORDS
 
-# What a backslash may introduce inside a string literal. Anything else is an
-# error rather than a silently preserved backslash: a typo in an escape should
-# not turn into two characters nobody asked for.
+# Anything else after a backslash is an error, so a typo in an escape does not
+# turn into two characters nobody asked for.
 ESCAPES = {
     'n': '\n',
     't': '\t',
@@ -96,7 +95,6 @@ class Lexer:
         if c == '-':
             self._add_token(TokenType.MINUS); return
         if c == '+':
-            # '+' or future '+=' (not yet used)
             self._add_token(TokenType.PLUS); return
         if c == ';':
             self._add_token(TokenType.SEMICOLON); return
@@ -123,7 +121,6 @@ class Lexer:
             self._add_token(TokenType.AMP); return
         if c == '/':
             if self._match('/'):
-                # comment until end of line
                 while self._peek() != '\n' and not self._is_at_end():
                     self._advance()
                 return
@@ -176,7 +173,7 @@ class Lexer:
             value_chars.append(ch)
         if self._is_at_end():
             raise LexError("Unterminated string literal", open_line, open_col)
-        self._advance()  # closing quote
+        self._advance()
         value = ''.join(value_chars)
         self._add_token(TokenType.STRING, value)
 
@@ -191,9 +188,7 @@ class Lexer:
             )
 
     def _number(self):
-        # Support hexadecimal literals of the form 0xNNNN or 0XNNNN
         if self.source[self.start] == '0' and self._peek() in ('x', 'X'):
-            # consume 'x' or 'X'
             self._advance()
             digit_start = self.current
             while True:
@@ -214,7 +209,6 @@ class Lexer:
             self._add_token(TokenType.NUMBER, value)
             return
 
-        # Decimal integer literal
         while self._peek().isdigit():
             self._advance()
         text = self.source[self.start:self.current]

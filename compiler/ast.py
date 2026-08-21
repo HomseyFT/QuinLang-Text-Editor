@@ -2,7 +2,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Union
 
-# Base node with location info
 @dataclass
 class Node:
     line: int = field(default=0, kw_only=True)
@@ -95,8 +94,8 @@ class Return(Stmt):
 
 @dataclass
 class VmAsm(Stmt):
-    # VM-level inline IR to be lowered directly to VM bytecode.
-    # The code is a small, line-based DSL understood by the VM backend.
+    # Raw text: a line-based DSL that codegen lowers straight to bytecode.
+    # No other pass looks inside it.
     code: str
 
 @dataclass
@@ -154,7 +153,7 @@ class StructDef(Node):
 
 @dataclass
 class Include(Node):
-    path: str  # The string literal path from the include statement
+    path: str
 
 @dataclass
 class Program(Node):

@@ -16,13 +16,12 @@ NULL_ADDR = 0
 #   word 1  detail - a struct type id for KIND_STRUCT, otherwise the payload
 #                    size in bytes
 #
-# Two words rather than a packed one so that neither the size nor the type id
-# competes with the flags for bits. It costs four bytes an object and in return
-# there is no size cliff and no bit-twiddling to read wrong.
+# Two words rather than one packed word, so neither the size nor the type id
+# competes with the flags for bits.
 #
 # The header makes the heap parseable: from the first object you can reach every
-# other by adding its size. Sweeping, coalescing, and resolving an interior
-# pointer to the object containing it all depend on that.
+# other by adding its size. Sweeping, compaction, and resolving an interior
+# pointer to its containing object all depend on that.
 HEADER_BYTES = 4
 HEAP_START = NULL_ADDR + 2  # leave address 0 reserved for null
 
@@ -119,12 +118,11 @@ class QuinVM:
                  structs: List[StructLayout] = None):
         self.code = code
         self.functions = functions
-        # map name -> index for convenience
         self.func_index: Dict[str, int] = {f.name: i for i, f in enumerate(functions)}
         self.strings = strings
         self.structs: List[StructLayout] = list(structs or [])
 
-        self.stack: List[int] = []          # value stack
+        self.stack: List[int] = []
         # Which operand-stack entries hold heap references, maintained in step
         # with self.stack. The compiler knows the type of every expression, but
         # that information does not survive into the flat operand stack, and a
@@ -133,8 +131,8 @@ class QuinVM:
         self.stack_is_ref: List[bool] = []
         self.call_stack: List[Frame] = []
         self.pc: int = 0
-        self.locals: List[int] = []         # current frame locals
-        self.current_fn: int = 0            # index of the function now running
+        self.locals: List[int] = []
+        self.current_fn: int = 0
         self.frame_base: int = 0            # stack height when current frame started
         self.heap: bytearray = bytearray(HEAP_SIZE)
         # Address 0 is reserved for null, so a real allocation can never be at
@@ -347,16 +345,15 @@ class QuinVM:
     def collect(self):
         """A precise, sliding mark-compact cycle.
 
-        Marking is unchanged. What follows it is: work out where each surviving
-        object will sit once the gaps are closed, rewrite every reference to
-        point there, and only then move anything. Building the whole plan
-        before touching the heap is what makes the move a plain copy.
+        Mark, then work out where each survivor will sit once the gaps close,
+        rewrite every reference to point there, and only then move anything.
+        Building the whole plan before touching the heap makes the move a plain
+        copy.
 
-        Moving objects is safe only because the roots are exact and because no
-        QuinLang expression can turn a reference into an int -- neither
+        Moving objects is safe only because the roots are exact and no QuinLang
+        expression can turn a reference into an int -- neither
         `heapptr - heapptr` nor address-of on a reference exists. A program
-        cannot be holding a copy of an address that the collector fails to
-        find and update.
+        cannot hold a copy of an address the collector fails to update.
         """
         self.stats.collections += 1
         starts = self._object_starts()
@@ -430,11 +427,9 @@ class QuinVM:
     def _plan_compaction(self) -> Dict[int, int]:
         """Decide where every surviving object will live once gaps are closed.
 
-        Returns old payload address -> new payload address. The map is an
-        ordinary dict rather than forwarding words written into the heap: the
-        collector runs in Python, so it can afford host memory, and the pass
-        reads as the arithmetic it is. A collector living inside the heap it
-        manages would not have that luxury.
+        Returns old payload address -> new payload address. A host-side dict
+        rather than forwarding words written into the heap, which a collector
+        running inside the heap it manages could not afford.
         """
         forward: Dict[int, int] = {}
         free = HEAP_START
@@ -761,7 +756,6 @@ class QuinVM:
                 self._push(ret_val, ret_is_ref)
 
             elif op is OpCode.BOUNDS_CHECK:
-                # Inspect the index on top of the stack without popping it.
                 if len(self.stack) <= self.frame_base:
                     raise VMError(f"Operand stack underflow on BOUNDS_CHECK at pc={self.pc - 1}")
                 idx = to_signed(self.stack[-1])

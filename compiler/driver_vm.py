@@ -8,14 +8,10 @@ import sys
 
 
 def process_exit_code(value: int) -> int:
-    """Narrow main's return value to what a process exit status can carry.
-
-    int is 16-bit and signed; an exit status is 8 bits. The low byte is what
-    survives, exactly as in C: 256 exits 0 and -1 exits 255.
+    """Narrow main's 16-bit return value to the 8 bits an exit status carries.
 
     POSIX truncates this way regardless, but Windows exit codes are 32 bits
-    wide and would otherwise report -1 as 4294967295. Doing it here keeps the
-    result the same everywhere.
+    wide and would otherwise report -1 as 4294967295.
     """
     return value & 0xFF
 
@@ -25,11 +21,9 @@ def main():
     ap.add_argument("source", type=Path, help="Source .ql file")
     args = ap.parse_args()
 
-    # Determine std library path (relative to compiler package)
     std_path = Path(__file__).parent.parent / "std"
 
     try:
-        # Resolve all includes and merge into a single program
         resolver = ImportResolver(std_path)
         resolved = resolver.resolve(args.source)
         ast = resolved.program
@@ -47,8 +41,8 @@ def main():
         print(f"Codegen error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Warnings do not stop the program or change its exit code; they go to
-    # stderr so piping stdout stays clean.
+    # Warnings go to stderr so piping stdout stays clean, and change neither
+    # the exit code nor whether the program runs.
     for warning in ctx.warnings:
         print(f"Warning: {warning}", file=sys.stderr)
 
@@ -59,8 +53,6 @@ def main():
         print(f"Runtime error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # main's return value becomes the process exit status, so a QuinLang
-    # program can be tested from a shell.
     sys.exit(process_exit_code(exit_value))
 
 

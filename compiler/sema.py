@@ -22,10 +22,9 @@ def wrap16(value: int) -> int:
 def const_int(e: A.Expr):
     """Evaluate an expression built only from int literals, else return None.
 
-    Enough folding to recognise what people actually write for an exit code:
-    a literal, a negation, or the `0 - 1` idiom the language requires in place
-    of a negative literal. Results wrap at 16 bits so the value reported
-    matches the one the program will really return.
+    Only enough folding to recognise what people write for an exit code,
+    including the `0 - 1` idiom the language requires in place of a negative
+    literal. Wraps at 16 bits so the reported value is the one really returned.
     """
     if isinstance(e, A.Literal):
         if isinstance(e.value, int) and not isinstance(e.value, bool):
@@ -127,9 +126,9 @@ class Scope:
 class Context:
     """Everything the front end learned, for the backend to consume.
 
-    Name resolution and typing both happen here exactly once. A backend reads
-    these tables rather than walking scopes again, so there is a single
-    implementation of what a given identifier refers to.
+    Name resolution and typing happen here exactly once; a backend reads these
+    tables rather than walking scopes again, so there is a single implementation
+    of what an identifier refers to.
     """
 
     def __init__(self):
@@ -148,15 +147,12 @@ class Context:
         # id(VmAsm) -> names visible at that block, since its body is raw text
         # that no other pass resolves.
         self.asm_scope: Dict[int, Dict[str, Symbol]] = {}
-        # Statement list (or For node) -> the reference-typed symbols the scope
-        # it introduces declares directly. Codegen uses this to release those
-        # slots when the scope ends, so an out-of-scope variable stops rooting
-        # its object. Codegen never walks scopes itself, which is what keeps
-        # the two passes from disagreeing about what a name means.
+        # Statement list (or For node) -> the reference-typed symbols its scope
+        # declares directly. Codegen releases these slots when the scope ends,
+        # so an out-of-scope variable stops rooting its object.
         self.scope_refs: Dict[int, List[Symbol]] = {}
-        # Non-fatal diagnostics. Sema is the only pass that raises one today,
-        # but codegen already receives this Context, so it can add its own
-        # without any structural change.
+        # Sema is the only pass that raises one today, but codegen receives
+        # this Context too and could add its own.
         self.warnings: List[Diagnostic] = []
 
     def set_type(self, node: A.Expr, t: Type):
@@ -240,7 +236,6 @@ class SemanticAnalyzer:
         # Structs first: function signatures may mention struct types.
         self._register_structs(program)
 
-        # Register builtin functions first
         for name, (param_names, ret_name) in get_builtins().items():
             if name in self.ctx.functions:
                 continue
@@ -298,7 +293,6 @@ class SemanticAnalyzer:
             sym = scope.define(Symbol(p.name, t), p.line, p.col)
             self.ctx.bind(p, sym)
             self._frame.append(sym)
-        # Check if function body always returns
         always_returns = any(self._always_returns(st, scope, sig.ret) for st in fn.body)
         for st in fn.body:
             self._analyze_stmt(st, scope, sig.ret)
@@ -336,7 +330,6 @@ class SemanticAnalyzer:
             self.ctx.bind(st, sym)
             self._frame.append(sym)
         elif isinstance(st, A.Assign):
-            # Generalized assignment target
             if isinstance(st.target, A.Identifier):
                 sym = scope.resolve(st.target.name)
                 if sym is None:
@@ -353,11 +346,11 @@ class SemanticAnalyzer:
                     raise SemanticError(f"Cannot assign {val_t} to {sym.type} variable '{st.target.name}'", st.target.line, st.target.col)
             elif isinstance(st.target, A.Index):
                 arr_t = self._analyze_expr(st.target.array, scope)
-                if not is_array_type(arr_t):
-                    raise SemanticError("Index target must be an int[N] array", st.target.line, st.target.col)
-                idx_t = self._analyze_expr(st.target.index, scope)
-                if idx_t != Int:
-                    raise SemanticError("Array index must be int", st.target.line, st.target.col)
+                self._validate_index(
+                    arr_t, st.target.index, scope,
+                    "Index target must be an int[N] array",
+                    st.target.line, st.target.col,
+                )
                 val_t = self._analyze_expr(st.value, scope)
                 if val_t != Int:
                     raise SemanticError("Array elements must be int", st.line, st.col)
@@ -454,27 +447,22 @@ class SemanticAnalyzer:
             # imbalance surfaces as a VM error at RET.
             self.ctx.asm_scope[id(st)] = scope.visible()
         else:
-            # Ignore blocks etc.
             pass
 
     def _record_scope_refs(self, key, scope: Scope):
         """Note the references a scope declares, for codegen to release.
 
-        Scope.vars holds exactly the names declared directly in this scope, in
-        declaration order. A scope that declares no references records nothing,
-        so ordinary code costs no instructions.
+        A scope declaring no references records nothing, so ordinary code costs
+        no instructions.
         """
         refs = [sym for sym in scope.vars.values() if is_reference_type(sym.type)]
         if refs:
             self.ctx.scope_refs[id(key)] = refs
 
     def _check_exit_code(self, value: A.Expr):
-        """Warn when main returns a constant the exit code cannot represent.
-
-        Only constants can be judged here; `return f()` is left alone. The
-        point is to stop `return 256` from quietly exiting 0 and reading as
-        success.
-        """
+        """Warn when main returns a constant the exit code cannot represent, so
+        that `return 256` does not quietly exit 0 and read as success.
+        `return f()` cannot be judged and is left alone."""
         result = const_int(value)
         if result is None or 0 <= result <= EXIT_CODE_MAX:
             return
@@ -496,36 +484,27 @@ class SemanticAnalyzer:
             # return after it to satisfy the return check.
             return True
         if isinstance(st, A.Block):
-            # A block always returns if any statement in it always returns
             for s in st.stmts:
                 if self._always_returns(s, scope, ret_type):
                     return True
             return False
         if isinstance(st, A.If):
-            # If with both branches: returns only if both branches always return
             then_always = any(self._always_returns(s, scope, ret_type) for s in st.then_block)
             if st.else_block:
                 else_always = any(self._always_returns(s, scope, ret_type) for s in st.else_block)
                 return then_always and else_always
             else:
-                # No else branch: not guaranteed
                 return False
         if isinstance(st, (A.While, A.For)):
             # A loop body may not run, so it never guarantees a return. An
             # unconditional loop that only exits by 'return' is rejected too;
             # the check is deliberately conservative.
             return False
-        # All other statements (VarDecl, Assign, ExprStmt, Print, PrintLn,
-        # Break, Continue, etc.) do not guarantee return
         return False
 
     def _validate_index(self, arr_t: Type, idx_expr: A.Expr, scope: Scope, not_array_msg: str, line: int, col: int):
-        """Validate an array index expression.
-
-        Requires arr_t to be an int[N] array, idx_expr to type as Int,
-        and rejects a literal int index (excluding bool) that is negative
-        or >= array_length.
-        """
+        """Shared by reads, assignment targets and address-of, so a literal
+        index out of range is caught the same way in all three."""
         if not is_array_type(arr_t):
             raise SemanticError(not_array_msg, line, col)
         idx_t = self._analyze_expr(idx_expr, scope)
@@ -580,11 +559,9 @@ class SemanticAnalyzer:
             lt = self._analyze_expr(e.left, scope)
             rt = self._analyze_expr(e.right, scope)
             if e.op in ('+', '-', '*', '/'):
-                # String concatenation, which builds a new string.
                 if e.op == '+' and lt == Str and rt == Str:
                     self.ctx.set_type(e, Str)
                     return Str
-                # Heap pointer arithmetic: allow heapptr +/- int, and heapptr - heapptr.
                 if e.op == '+':
                     if (lt == HeapPtr and rt == Int) or (lt == Int and rt == HeapPtr):
                         self.ctx.set_type(e, HeapPtr)
@@ -603,7 +580,6 @@ class SemanticAnalyzer:
                             "converted to an int",
                             e.line, e.col,
                         )
-                # Fall through to existing int-only rule for all other combos.
                 if lt == Int and rt == Int:
                     self.ctx.set_type(e, Int)
                     return Int
@@ -737,7 +713,6 @@ class SemanticAnalyzer:
             self.ctx.set_type(e, t)
             return t
         if isinstance(e, A.Call):
-            # Special handling for array helpers
             if e.callee == "array_push":
                 if len(e.args) != 3:
                     raise SemanticError("array_push expects 3 arguments", e.line, e.col)

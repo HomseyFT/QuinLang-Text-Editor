@@ -33,11 +33,11 @@ class TokenType(Enum):
     LESS_EQUAL = auto()
     AND_AND = auto()
     OR_OR = auto()
-    PERCENT = auto()  # New token type for modulo operator
-    CARET = auto()    # New token type for bitwise XOR operator
-    PIPE = auto()     # New token type for bitwise OR operator
-    SHL = auto()      # New token type for left shift operator
-    SHR = auto()      # New token type for right shift operator
+    PERCENT = auto()
+    CARET = auto()
+    PIPE = auto()
+    SHL = auto()
+    SHR = auto()
 
     # Literals
     IDENTIFIER = auto()

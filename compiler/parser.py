@@ -101,7 +101,6 @@ class Parser:
         return A.Function(name_tok.lexeme, params, ret_type, body, line=name_tok.line, col=name_tok.col)
 
     def _type_name(self) -> str:
-        # base scalar types
         if self._match(TokenType.INT):
             base = "int"
         elif self._match(TokenType.STR):
@@ -113,13 +112,10 @@ class Parser:
         elif self._match(TokenType.HEAPPTR):
             base = "heapptr"
         else:
-            # allow identifiers for user-defined types in future
             tok = self._consume(TokenType.IDENTIFIER, "Expected type name")
             base = tok.lexeme
 
-        # Optional fixed-size int array syntax: int[NUMBER]
         if base == "int" and self._match(TokenType.LEFT_BRACKET):
-            # Expect a numeric literal for the length
             num_tok = self._consume(TokenType.NUMBER, "Expected array size after '['")
             self._consume(TokenType.RIGHT_BRACKET, "Expected ']' after array size")
             return f"int[{int(num_tok.literal)}]"
@@ -243,7 +239,6 @@ class Parser:
             # A bare block, which exists only to introduce a scope.
             tok = self._peek()
             return A.Block(self._block(), line=tok.line, col=tok.col)
-        # General expression / assignment form: `expr` or `expr = value`.
         expr = self._expression()
         if self._match(TokenType.EQUAL):
             eq_tok = self._previous()
@@ -339,7 +334,7 @@ class Parser:
 
     def _factor(self) -> A.Expr:
         expr = self._unary()
-        while self._match(TokenType.STAR, TokenType.SLASH, TokenType.PERCENT):  # Add modulo operator
+        while self._match(TokenType.STAR, TokenType.SLASH, TokenType.PERCENT):
             op_tok = self._previous()
             op = op_tok.lexeme
             right = self._unary()
@@ -347,7 +342,7 @@ class Parser:
         return expr
 
     def _unary(self) -> A.Expr:
-        # Address-of: &expr (limited to identifiers and indexing at sema/codegen)
+        # Parsed for any operand; sema/codegen narrow it to identifiers and indexing.
         if self._match(TokenType.AT):
             tok = self._previous()
             target = self._unary()
@@ -361,9 +356,7 @@ class Parser:
 
     def _call(self) -> A.Expr:
         expr = self._primary()
-        # Support chained postfix operators: calls and indexing.
         while True:
-            # Function call: IDENT '(' args? ')'
             if isinstance(expr, A.Identifier) and self._match(TokenType.LEFT_PAREN):
                 paren_tok = self._previous()
                 args: List[A.Expr] = []
@@ -375,15 +368,13 @@ class Parser:
                 self._consume(TokenType.RIGHT_PAREN, "Expected ')' after arguments")
                 expr = A.Call(expr.name, args, line=paren_tok.line, col=paren_tok.col)
                 continue
-            # Indexing: expr '[' expression ']'
-            # ALSO: Indexing: any expression can be the base (e.g. chained arr[i][j])
+            # Any expression may be the base, so `arr[i][j]` chains.
             if self._match(TokenType.LEFT_BRACKET):
                 bracket_tok = self._previous()
                 index_expr = self._expression()
                 self._consume(TokenType.RIGHT_BRACKET, "Expected ']' after index expression")
                 expr = A.Index(expr, index_expr, line=bracket_tok.line, col=bracket_tok.col)
                 continue
-            # Field access: expr '.' IDENT
             if self._match(TokenType.DOT):
                 field_tok = self._consume(TokenType.IDENTIFIER, "Expected field name after '.'")
                 expr = A.FieldAccess(expr, field_tok.lexeme, line=field_tok.line, col=field_tok.col)
@@ -405,7 +396,6 @@ class Parser:
         return A.StructLit(name_tok.lexeme, inits, line=name_tok.line, col=name_tok.col)
 
     def _vm_asm_block(self, kw_tok: Token) -> A.Stmt:
-        # Parse: vm_asm { INSTR ...; INSTR2 ...; }
         self._consume(TokenType.LEFT_BRACE, "Expected '{' after 'vm_asm'")
         lines = []
         current_parts = []
@@ -414,7 +404,6 @@ class Parser:
         while not self._check(TokenType.RIGHT_BRACE) and not self._is_at_end():
             tok = self._advance()
             if tok.type == TokenType.SEMICOLON:
-                # End of one vm_asm instruction line.
                 current_parts.append(tok.lexeme)
                 line = " ".join(current_parts).strip()
                 if line:
@@ -422,6 +411,14 @@ class Parser:
                 current_parts = []
             else:
                 current_parts.append(tok.lexeme)
+        # Anything still pending never met its ';'. Dropping it would silently
+        # delete an instruction, so it is an error like any other malformed one.
+        if current_parts:
+            trailing = " ".join(current_parts).strip()
+            raise ParseError(
+                f"Expected ';' after vm_asm instruction '{trailing}'",
+                kw_tok.line, kw_tok.col,
+            )
         self._consume(TokenType.RIGHT_BRACE, "Expected '}' after vm_asm block")
         code = "\n".join(lines)
         return A.VmAsm(code, line=kw_tok.line, col=kw_tok.col)
