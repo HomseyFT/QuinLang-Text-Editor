@@ -7,6 +7,15 @@ from runtime.vm import QuinVM, VMError
 import sys
 
 
+# A program's own return value can still be 2 or 3 -- main returns a byte, so
+# no code is reserved from it. Moving the tool's errors off 1 just puts them on
+# values a program is far less likely to pick deliberately, and stderr remains
+# the only certain signal. 2 doubles as argparse's exit for a bad command line;
+# both mean "nothing ran".
+EXIT_COMPILE_ERROR = 2
+EXIT_RUNTIME_ERROR = 3
+
+
 def process_exit_code(value: int) -> int:
     """Narrow main's 16-bit return value to the 8 bits an exit status carries.
 
@@ -33,13 +42,13 @@ def main():
         code, functions, strings, structs = codegen.generate(ast, ctx)
     except ResolveError as e:
         print(f"Import error: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_COMPILE_ERROR)
     except SemanticError as e:
         print(f"Semantic error: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_COMPILE_ERROR)
     except CodegenError as e:
         print(f"Codegen error: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_COMPILE_ERROR)
 
     # Warnings go to stderr so piping stdout stays clean, and change neither
     # the exit code nor whether the program runs.
@@ -51,7 +60,7 @@ def main():
         exit_value = vm.run_main()
     except VMError as e:
         print(f"Runtime error: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(EXIT_RUNTIME_ERROR)
 
     sys.exit(process_exit_code(exit_value))
 

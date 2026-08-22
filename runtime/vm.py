@@ -1,5 +1,7 @@
 from __future__ import annotations
 import bisect
+import math
+import struct
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple
 from compiler.bytecode import OpCode, Instruction, Bytecode
@@ -62,6 +64,10 @@ class FunctionInfo:
     # is reserved for null, so a slot read before its first assignment is
     # simply skipped.
     ref_slots: Tuple[int, ...] = ()
+    # How many slots each parameter occupies, in order. Every parameter is one
+    # operand-stack entry, but a float parameter fills two slots once stored,
+    # so CALL cannot assume argument i lands in local i.
+    param_words: Tuple[int, ...] = ()
 
 
 @dataclass
@@ -83,6 +89,55 @@ class HeapStats:
     bytes_freed: int = 0
     objects_allocated: int = 0
     objects_moved: int = 0
+
+
+# A float is one operand-stack entry holding its 32-bit IEEE 754 pattern, and
+# two consecutive 16-bit slots once stored in a frame or a heap object. Keeping
+# it whole on the stack is what lets POP, DUP, SWAP and the RET balance check
+# stay one entry per value.
+FLOAT_MASK = 0xFFFFFFFF
+
+
+def bits_to_float(bits: int) -> float:
+    return struct.unpack("<f", struct.pack("<I", bits & FLOAT_MASK))[0]
+
+
+def float_to_bits(value: float) -> int:
+    """The 32-bit pattern for a float, refusing anything not representable.
+
+    Arithmetic happens in Python doubles, so a product can land outside the
+    float range. Packing it would store infinity and let the wrongness spread
+    silently, which is worse than the int types' documented wrapping -- so it
+    faults instead.
+    """
+    # struct.pack accepts infinity happily, so isfinite has to be checked
+    # separately from the range OverflowError reports.
+    if not math.isfinite(value):
+        raise VMError(f"Float overflow: {value!r} is not a finite 32-bit float")
+    try:
+        return struct.unpack("<I", struct.pack("<f", value))[0]
+    except (OverflowError, ValueError):
+        raise VMError(f"Float overflow: {value!r} does not fit in a 32-bit float")
+
+
+def format_float(value: float) -> str:
+    """How a float prints: the shortest decimal that reads back as the same
+    32-bit value, always with a decimal point so 3.0 does not look like an int.
+
+    repr() alone would be wrong here. It gives the shortest string that
+    round-trips through a *double*, and these values are floats widened to
+    double -- so `0.1 + 0.2` would print as 0.30000001192092896, showing
+    seventeen digits of precision the 32-bit value does not carry.
+    """
+    for digits in range(1, 10):
+        text = f"{value:.{digits}g}"
+        if struct.unpack("<f", struct.pack("<f", float(text)))[0] == value:
+            break
+    else:
+        text = repr(value)
+    if any(c in text for c in ".eE") or text in ("inf", "-inf", "nan"):
+        return text
+    return text + ".0"
 
 
 def to_signed(v: int) -> int:
@@ -164,6 +219,31 @@ class QuinVM:
         self.stack.append(value & WORD_MASK)
         self.stack_is_ref.append(is_ref)
 
+    def _push_raw(self, value: int, is_ref: bool):
+        """Put back a value that was already on the stack, unchanged.
+
+        _push masks to 16 bits, which is right for a freshly computed int and
+        wrong for anything already normalised -- it would keep only the low
+        half of a float's 32-bit pattern. Every site that pops a value and
+        pushes the same value back belongs here.
+        """
+        self.stack.append(value)
+        self.stack_is_ref.append(is_ref)
+
+    def _push_float(self, value: float):
+        """Push a float as one entry holding its full 32-bit pattern.
+
+        Never a reference, so the collector ignores it whatever the pattern
+        happens to look like.
+        """
+        self._push_raw(float_to_bits(value), False)
+
+    def _pop_float(self) -> float:
+        """Pop a float. _pop narrows nothing -- the 16-bit mask is applied on
+        the way in -- so the full pattern survives.
+        """
+        return bits_to_float(self._pop())
+
     def _pop(self) -> int:
         """Pop one value, refusing to reach below the current frame's base."""
         if len(self.stack) <= self.frame_base:
@@ -184,6 +264,15 @@ class QuinVM:
                 f"index={index}, num_locals={len(self.locals)}"
             )
         return self.locals[index]
+
+    def _local_float(self, index: int) -> float:
+        """The float in slots `index` and `index + 1`, low word first."""
+        return bits_to_float(self._local(index) | (self._local(index + 1) << 16))
+
+    def _set_local_float(self, index: int, value: float):
+        bits = float_to_bits(value)
+        self._set_local(index, bits & WORD_MASK)
+        self._set_local(index + 1, (bits >> 16) & WORD_MASK)
 
     def _set_local(self, index: int, value: int):
         if index < 0 or index >= len(self.locals):
@@ -628,6 +717,57 @@ class QuinVM:
             elif op is OpCode.NEG:
                 self._push(-self._pop())
 
+            elif op is OpCode.PUSH_FLOAT:
+                # The operand is already the bit pattern; nothing to convert.
+                self.stack.append(int(arg) & FLOAT_MASK)
+                self.stack_is_ref.append(False)
+
+            elif op is OpCode.LOAD_LOCAL_F:
+                self._push_float(self._local_float(int(arg)))
+
+            elif op is OpCode.STORE_LOCAL_F:
+                self._set_local_float(int(arg), self._pop_float())
+
+            elif op is OpCode.FADD:
+                b = self._pop_float(); a = self._pop_float()
+                self._push_float(a + b)
+
+            elif op is OpCode.FSUB:
+                b = self._pop_float(); a = self._pop_float()
+                self._push_float(a - b)
+
+            elif op is OpCode.FMUL:
+                b = self._pop_float(); a = self._pop_float()
+                self._push_float(a * b)
+
+            elif op is OpCode.FDIV:
+                b = self._pop_float(); a = self._pop_float()
+                if b == 0.0:
+                    # Integer division already faults here. Returning inf or
+                    # nan instead would mean every later comparison quietly
+                    # lied, and FCMP has no way to express nan.
+                    raise VMError("Float division by zero")
+                self._push_float(a / b)
+
+            elif op is OpCode.FNEG:
+                self._push_float(-self._pop_float())
+
+            elif op is OpCode.FCMP:
+                b = self._pop_float(); a = self._pop_float()
+                self._push((a > b) - (a < b))
+
+            elif op is OpCode.F_FROM_INT:
+                self._push_float(float(to_signed(self._pop())))
+
+            elif op is OpCode.F_TO_INT:
+                value = self._pop_float()
+                truncated = int(value)  # toward zero, like trunc_div
+                if truncated < -0x8000 or truncated > 0x7FFF:
+                    raise VMError(
+                        f"float_to_int: {value!r} does not fit in a 16-bit int"
+                    )
+                self._push(truncated)
+
             elif op in (OpCode.CMP_EQ, OpCode.CMP_NE, OpCode.CMP_LT,
                         OpCode.CMP_LE, OpCode.CMP_GT, OpCode.CMP_GE):
                 # int is signed, so ordering must compare sign-extended values;
@@ -689,6 +829,10 @@ class QuinVM:
                     )
                 self._push(self._alloc_string(data[start:end]), True)
 
+            elif op is OpCode.STR_FROM_FLOAT:
+                self._push(self._alloc_string(
+                    format_float(self._pop_float()).encode("latin-1")), True)
+
             elif op is OpCode.STR_FROM_INT:
                 self._push(self._alloc_string(
                     str(to_signed(self._pop())).encode("latin-1")), True)
@@ -731,9 +875,19 @@ class QuinVM:
                     Frame(self.pc, self.locals, self.frame_base, self.current_fn))
                 self.current_fn = fn_id
                 self.locals = [0] * fn.num_locals
+                # Arguments land in the leading locals, but a float argument
+                # arrives as one stack entry and fills two slots, so the slot
+                # index advances by each parameter's width rather than by one.
+                slot = 0
                 for i, v in enumerate(args):
-                    if i < len(self.locals):
-                        self.locals[i] = v & WORD_MASK
+                    width = fn.param_words[i] if i < len(fn.param_words) else 1
+                    if width == 2:
+                        if slot + 1 < len(self.locals):
+                            self.locals[slot] = v & WORD_MASK
+                            self.locals[slot + 1] = (v >> 16) & WORD_MASK
+                    elif slot < len(self.locals):
+                        self.locals[slot] = v & WORD_MASK
+                    slot += width
                 self.frame_base = len(self.stack)
                 self.pc = fn.entry_pc
 
@@ -753,7 +907,7 @@ class QuinVM:
                 self.frame_base = frame.stack_base
                 self.current_fn = frame.fn_index
                 self.pc = frame.return_pc
-                self._push(ret_val, ret_is_ref)
+                self._push_raw(ret_val, ret_is_ref)
 
             elif op is OpCode.BOUNDS_CHECK:
                 if len(self.stack) <= self.frame_base:
@@ -811,12 +965,18 @@ class QuinVM:
             elif op is OpCode.DUP:
                 if len(self.stack) <= self.frame_base:
                     raise VMError(f"Operand stack underflow on DUP at pc={self.pc - 1}")
-                self._push(self.stack[-1], self.stack_is_ref[-1])
+                self._push_raw(self.stack[-1], self.stack_is_ref[-1])
 
             elif op is OpCode.SWAP:
                 b, b_ref = self._pop_tagged(); a, a_ref = self._pop_tagged()
-                self._push(b, b_ref)
-                self._push(a, a_ref)
+                self._push_raw(b, b_ref)
+                self._push_raw(a, a_ref)
+
+            elif op is OpCode.PRINT_FLOAT:
+                print(format_float(self._pop_float()), end="")
+
+            elif op is OpCode.PRINTLN_FLOAT:
+                print(format_float(self._pop_float()))
 
             elif op is OpCode.PRINT_INT:
                 print(to_signed(self._pop()), end="")
@@ -881,6 +1041,29 @@ class QuinVM:
                 addr = ref + int(arg) * 2
                 self._check_heap_word(addr, "HEAP_STORE_FIELD")
                 self._write_word(addr, value)
+
+            elif op is OpCode.HEAP_LOAD_FIELD_F:
+                ref = self._pop()
+                if ref == NULL_ADDR:
+                    raise VMError("Null pointer dereference reading a field")
+                addr = ref + int(arg) * 2
+                # Both words, because the second is as much a part of the value
+                # as the first and a truncated object must not read half of it.
+                self._check_heap_word(addr, "HEAP_LOAD_FIELD_F")
+                self._check_heap_word(addr + 2, "HEAP_LOAD_FIELD_F")
+                self._push_float(bits_to_float(
+                    self._read_word(addr) | (self._read_word(addr + 2) << 16)))
+
+            elif op is OpCode.HEAP_STORE_FIELD_F:
+                bits = float_to_bits(self._pop_float())
+                ref = self._pop()
+                if ref == NULL_ADDR:
+                    raise VMError("Null pointer dereference writing a field")
+                addr = ref + int(arg) * 2
+                self._check_heap_word(addr, "HEAP_STORE_FIELD_F")
+                self._check_heap_word(addr + 2, "HEAP_STORE_FIELD_F")
+                self._write_word(addr, bits & WORD_MASK)
+                self._write_word(addr + 2, (bits >> 16) & WORD_MASK)
 
             else:
                 raise VMError(f"Unknown opcode {op}")

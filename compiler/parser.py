@@ -105,6 +105,8 @@ class Parser:
             base = "int"
         elif self._match(TokenType.STR):
             base = "str"
+        elif self._match(TokenType.FLOAT):
+            base = "float"
         elif self._match(TokenType.VOID):
             base = "void"
         elif self._match(TokenType.PTR):
@@ -119,6 +121,15 @@ class Parser:
             num_tok = self._consume(TokenType.NUMBER, "Expected array size after '['")
             self._consume(TokenType.RIGHT_BRACKET, "Expected ']' after array size")
             return f"int[{int(num_tok.literal)}]"
+
+        # int is the only array element type. Saying so beats letting the '['
+        # fall through to a parse error about an unexpected token.
+        if self._check(TokenType.LEFT_BRACKET):
+            tok = self._peek()
+            raise ParseError(
+                f"Only int arrays exist; '{base}[N]' is not a type",
+                tok.line, tok.col,
+            )
 
         return base
 
@@ -434,6 +445,9 @@ class Parser:
             tok = self._previous()
             return A.Literal(None, line=tok.line, col=tok.col)
         if self._match(TokenType.NUMBER):
+            tok = self._previous()
+            return A.Literal(tok.literal, line=tok.line, col=tok.col)
+        if self._match(TokenType.FLOAT_NUMBER):
             tok = self._previous()
             return A.Literal(tok.literal, line=tok.line, col=tok.col)
         if self._match(TokenType.STRING):

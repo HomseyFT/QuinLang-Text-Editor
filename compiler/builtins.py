@@ -36,4 +36,9 @@ def get_builtins() -> Dict[str, BuiltinSig]:
         "str_slice":   (["str", "int", "int"], "str"),
         "int_to_str":  (["int"], "str"),
         "char_to_str": (["int"], "str"),
+        # int and float never convert implicitly, so these are the only bridge
+        # between them. float_to_int truncates toward zero, like integer '/'.
+        "int_to_float":  (["int"], "float"),
+        "float_to_int":  (["float"], "int"),
+        "float_to_str":  (["float"], "str"),
     }

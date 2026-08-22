@@ -1,5 +1,10 @@
+import math
 from typing import List
 from .tokens import Token, TokenType, KEYWORDS
+
+# The largest finite value a 32-bit float can hold. A literal above it would
+# otherwise be stored as infinity.
+FLOAT32_MAX = 3.4028234663852886e38
 
 # Anything else after a backslash is an error, so a typo in an escape does not
 # turn into two characters nobody asked for.
@@ -177,6 +182,21 @@ class Lexer:
         value = ''.join(value_chars)
         self._add_token(TokenType.STRING, value)
 
+    def _check_trailing(self):
+        """Reject a numeric literal that runs straight into a letter.
+
+        Without this `1e5` lexes as `1` followed by the identifier `e5`, which
+        parses as two things and means neither. There is no exponent notation,
+        so saying so is better than silently splitting the token.
+        """
+        if self._peek().isalnum() or self._peek() == '_':
+            text = self.source[self.start:self.current]
+            raise LexError(
+                f"Unexpected character '{self._peek()}' after numeric literal '{text}'",
+                self.line,
+                self.col,
+            )
+
     def _check_range(self, value: int, text: str):
         # int is a 16-bit type. Negation is a separate unary operator, so a
         # literal itself is always non-negative and must fit in a word.
@@ -203,6 +223,7 @@ class Lexer:
                     self.line,
                     self.col - (self.current - self.start),
                 )
+            self._check_trailing()
             text = self.source[self.start:self.current]
             value = int(text[2:], 16)
             self._check_range(value, text)
@@ -211,10 +232,45 @@ class Lexer:
 
         while self._peek().isdigit():
             self._advance()
+
+        if self._peek() == '.':
+            # A float needs digits on both sides. `1.` is rejected rather than
+            # left as `1` followed by DOT, which would only fail later and
+            # somewhere less helpful. Nothing else can follow a number with a
+            # dot, so there is no ambiguity with field access to preserve.
+            if not self._peek_next().isdigit():
+                raise LexError(
+                    "Float literal needs at least one digit after '.'",
+                    self.line,
+                    self.col,
+                )
+            self._advance()
+            while self._peek().isdigit():
+                self._advance()
+            self._check_trailing()
+            text = self.source[self.start:self.current]
+            value = float(text)
+            self._check_float_range(value, text)
+            self._add_token(TokenType.FLOAT_NUMBER, value)
+            return
+
+        self._check_trailing()
         text = self.source[self.start:self.current]
         value = int(text)
         self._check_range(value, text)
         self._add_token(TokenType.NUMBER, value)
+
+    def _check_float_range(self, value: float, text: str):
+        # float() happily returns inf for a literal past the double range, and
+        # struct.pack('f') would then store inf without complaint. A literal
+        # that cannot be represented is a mistake, not a request for infinity.
+        if not math.isfinite(value) or abs(value) > FLOAT32_MAX:
+            raise LexError(
+                f"Float literal '{text}' does not fit in a 32-bit float "
+                f"(max {FLOAT32_MAX:g})",
+                self.line,
+                self.col - (self.current - self.start),
+            )
 
     def _identifier(self):
         while self._peek().isalnum() or self._peek() == '_':

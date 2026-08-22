@@ -12,6 +12,10 @@ Int = Type("int", 2)
 Str = Type("str", 2)  # heap address of a string object
 Void = Type("void", 0)
 Bool = Type("bool", 1)
+# IEEE 754 single precision. The only type wider than a word: it takes two
+# consecutive slots wherever a value is stored, which is what word_count()
+# below exists to express.
+Float = Type("float", 4)
 
 # Two disjoint address spaces, kept as separate types so a pointer into one
 # cannot be dereferenced as if it belonged to the other:
@@ -36,6 +40,7 @@ BUILTIN_TYPES: Dict[str, Type] = {
     "str": Str,
     "void": Void,
     "bool": Bool,
+    "float": Float,
     "ptr": Ptr,
     "heapptr": HeapPtr,
 }
@@ -71,7 +76,7 @@ class StructInfo:
 
     @property
     def word_size(self) -> int:
-        return len(self.fields)
+        return sum(word_count(f.type) for f in self.fields)
 
     def field_named(self, name: str) -> Optional[StructField]:
         for f in self.fields:
@@ -85,6 +90,18 @@ class StructInfo:
         # `next: Node` builds Node's type while its field list is still empty,
         # so a size derived from the fields would not equal the completed one.
         return StructType(self.name, 2)
+
+
+def word_count(t: Type) -> int:
+    """How many 16-bit slots a value of this type occupies.
+
+    One for everything except float, which is 32 bits wide. Storage sizing goes
+    through here rather than assuming one slot per value, so adding another
+    wide type later does not mean hunting for the assumption again. Arrays are
+    not values in this sense -- an int[N] is N slots of int, and array_length()
+    answers that question.
+    """
+    return 2 if t == Float else 1
 
 
 def is_struct_type(t: Type) -> bool:

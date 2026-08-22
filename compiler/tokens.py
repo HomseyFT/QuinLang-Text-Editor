@@ -43,6 +43,7 @@ class TokenType(Enum):
     IDENTIFIER = auto()
     STRING = auto()
     NUMBER = auto()
+    FLOAT_NUMBER = auto()
 
     # Keywords
     FN = auto()
@@ -59,6 +60,7 @@ class TokenType(Enum):
     NULL = auto()
     INT = auto()
     STR = auto()
+    FLOAT = auto()
     VOID = auto()
     PTR = auto()
     HEAPPTR = auto()
@@ -85,6 +87,7 @@ KEYWORDS = {
     "null": TokenType.NULL,
     "int": TokenType.INT,
     "str": TokenType.STR,
+    "float": TokenType.FLOAT,
     "void": TokenType.VOID,
     "print": TokenType.PRINT,
     "println": TokenType.PRINTLN,

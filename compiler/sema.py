@@ -3,9 +3,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 from . import ast as A
 from .compiler_types import (
-    Type, Int, Str, Void, Bool, Ptr, HeapPtr, Null, StructInfo, StructField,
+    Type, Int, Str, Float, Void, Bool, Ptr, HeapPtr, Null, StructInfo, StructField,
     type_from_name, is_array_type, array_length, is_struct_type, is_reference_type,
-    assignable, comparable, BUILTIN_TYPES, UnknownTypeError,
+    assignable, comparable, word_count, BUILTIN_TYPES, UnknownTypeError,
 )
 from .builtins import get_builtins
 
@@ -212,7 +212,8 @@ class SemanticAnalyzer:
             info = self.ctx.structs[sd.name]
             fields: List[StructField] = []
             seen: Dict[str, bool] = {}
-            for offset, f in enumerate(sd.fields):
+            offset = 0
+            for f in sd.fields:
                 if f.name in seen:
                     raise SemanticError(
                         f"Duplicate field '{f.name}' in struct '{sd.name}'", f.line, f.col
@@ -230,6 +231,9 @@ class SemanticAnalyzer:
                         f"Field '{f.name}' cannot have type void", f.line, f.col
                     )
                 fields.append(StructField(f.name, ft, offset))
+                # Offsets are word offsets, and a float field is two words
+                # wide, so this is a running total rather than the field index.
+                offset += word_count(ft)
             info.fields = fields
 
     def analyze(self, program: A.Program) -> Context:
@@ -369,9 +373,10 @@ class SemanticAnalyzer:
             val_t = self._analyze_expr(st.value, scope)
             # bool prints as "true"/"false"; the VM backend lowers it via a
             # branch into the string table.
-            if val_t not in (Int, Str, Bool):
+            if val_t not in (Int, Str, Bool, Float):
                 raise SemanticError(
-                    f"print/println expect int, str, or bool, got {val_t}", st.line, st.col
+                    f"print/println expect int, float, str, or bool, got {val_t}",
+                    st.line, st.col
                 )
         elif isinstance(st, A.Return):
             if ret_type == Void and st.value is not None:
@@ -502,6 +507,35 @@ class SemanticAnalyzer:
             return False
         return False
 
+    @staticmethod
+    def _const_int(e: A.Expr):
+        """The value of `e` if it is an int literal, else None.
+
+        `bool` is excluded because it is an int subclass in Python and would
+        otherwise let `true` pass as the index 1.
+        """
+        if isinstance(e, A.Literal) and isinstance(e.value, int) and not isinstance(e.value, bool):
+            return e.value
+        return None
+
+    def _check_const_length(self, arr_t: Type, len_expr: A.Expr, what: str,
+                            offset: int, line: int, col: int):
+        """Reject an array_push/array_pop whose length is a literal that puts
+        the access outside the array. `offset` is what the builtin adds to the
+        length to reach the element it touches: 0 for push, -1 for pop.
+        """
+        len_val = self._const_int(len_expr)
+        length = array_length(arr_t)
+        if len_val is None or length is None:
+            return
+        idx = len_val + offset
+        if idx < 0 or idx >= length:
+            raise SemanticError(
+                f"{what} at length {len_val} accesses index {idx}, "
+                f"out of bounds for length {length}",
+                line, col,
+            )
+
     def _validate_index(self, arr_t: Type, idx_expr: A.Expr, scope: Scope, not_array_msg: str, line: int, col: int):
         """Shared by reads, assignment targets and address-of, so a literal
         index out of range is caught the same way in all three."""
@@ -510,15 +544,14 @@ class SemanticAnalyzer:
         idx_t = self._analyze_expr(idx_expr, scope)
         if idx_t != Int:
             raise SemanticError("Array index must be int", line, col)
-        if isinstance(idx_expr, A.Literal) and isinstance(idx_expr.value, int) and not isinstance(idx_expr.value, bool):
+        idx_val = self._const_int(idx_expr)
+        if idx_val is not None:
             length = array_length(arr_t)
-            if length is not None:
-                idx_val = idx_expr.value
-                if idx_val < 0 or idx_val >= length:
-                    raise SemanticError(
-                        f"Array index {idx_val} out of bounds for length {length}",
-                        line, col,
-                    )
+            if length is not None and (idx_val < 0 or idx_val >= length):
+                raise SemanticError(
+                    f"Array index {idx_val} out of bounds for length {length}",
+                    line, col,
+                )
 
     def _analyze_expr(self, e: A.Expr, scope: Scope) -> Type:
         if isinstance(e, A.Literal):
@@ -531,6 +564,9 @@ class SemanticAnalyzer:
             if isinstance(e.value, int):
                 self.ctx.set_type(e, Int)
                 return Int
+            if isinstance(e.value, float):
+                self.ctx.set_type(e, Float)
+                return Float
             if isinstance(e.value, str):
                 self.ctx.set_type(e, Str)
                 return Str
@@ -548,6 +584,9 @@ class SemanticAnalyzer:
             if e.op == '-' and t == Int:
                 self.ctx.set_type(e, Int)
                 return Int
+            if e.op == '-' and t == Float:
+                self.ctx.set_type(e, Float)
+                return Float
             if e.op == '!' and t == Bool:
                 self.ctx.set_type(e, Bool)
                 return Bool
@@ -583,36 +622,78 @@ class SemanticAnalyzer:
                 if lt == Int and rt == Int:
                     self.ctx.set_type(e, Int)
                     return Int
-                raise SemanticError("Arithmetic operators require int operands", e.line, e.col)
+                if lt == Float and rt == Float:
+                    self.ctx.set_type(e, Float)
+                    return Float
+                # int and float do not mix implicitly. A silent widening would
+                # make `n / 2` mean different things depending on a declaration
+                # elsewhere; int_to_float makes the choice visible.
+                if {lt, rt} == {Int, Float}:
+                    raise SemanticError(
+                        "Cannot mix int and float; convert explicitly with "
+                        "int_to_float or float_to_int",
+                        e.line, e.col,
+                    )
+                raise SemanticError("Arithmetic operators require int or float operands", e.line, e.col)
             if e.op == '%':
                 if lt == Int and rt == Int:
                     self.ctx.set_type(e, Int)
                     return Int
+                if lt == Float or rt == Float:
+                    raise SemanticError(
+                        "'%' does not apply to float; convert with float_to_int first",
+                        e.line, e.col,
+                    )
                 raise SemanticError("Modulo operator requires int operands", e.line, e.col)
             if e.op == '^':
                 if lt == Int and rt == Int:
                     self.ctx.set_type(e, Int)
                     return Int
+                if lt == Float or rt == Float:
+                    raise SemanticError(
+                        "'^' does not apply to float; convert with float_to_int first",
+                        e.line, e.col,
+                    )
                 raise SemanticError("Bitwise XOR operator requires int operands", e.line, e.col)
             if e.op == '&':
                 if lt == Int and rt == Int:
                     self.ctx.set_type(e, Int)
                     return Int
+                if lt == Float or rt == Float:
+                    raise SemanticError(
+                        "'&' does not apply to float; convert with float_to_int first",
+                        e.line, e.col,
+                    )
                 raise SemanticError("Bitwise AND operator requires int operands", e.line, e.col)
             if e.op == '|':
                 if lt == Int and rt == Int:
                     self.ctx.set_type(e, Int)
                     return Int
+                if lt == Float or rt == Float:
+                    raise SemanticError(
+                        "'|' does not apply to float; convert with float_to_int first",
+                        e.line, e.col,
+                    )
                 raise SemanticError("Bitwise OR operator requires int operands", e.line, e.col)
             if e.op == '<<':
                 if lt == Int and rt == Int:
                     self.ctx.set_type(e, Int)
                     return Int
+                if lt == Float or rt == Float:
+                    raise SemanticError(
+                        "'<<' does not apply to float; convert with float_to_int first",
+                        e.line, e.col,
+                    )
                 raise SemanticError("Left shift operator requires int operands", e.line, e.col)
             if e.op == '>>':
                 if lt == Int and rt == Int:
                     self.ctx.set_type(e, Int)
                     return Int
+                if lt == Float or rt == Float:
+                    raise SemanticError(
+                        "'>>' does not apply to float; convert with float_to_int first",
+                        e.line, e.col,
+                    )
                 raise SemanticError("Right shift operator requires int operands", e.line, e.col)
             if e.op in ('==', '!='):
                 # Equality is the one place null may meet a reference type.
@@ -655,6 +736,16 @@ class SemanticAnalyzer:
                         f"Cannot take the address of '{e.target.name}': it holds a "
                         f"{sym.type} reference, and a reference cannot be converted "
                         f"to an int",
+                        e.target.line, e.target.col,
+                    )
+                # A ptr addresses one slot, and a float is two. The pointer
+                # would silently name the low half, so load16 would read half a
+                # value and store16 would corrupt one. Nothing about the ptr
+                # type can express the difference, so the address is refused.
+                if sym.type == Float:
+                    raise SemanticError(
+                        f"Cannot take the address of '{e.target.name}': a float is "
+                        f"two slots wide and a ptr addresses one",
                         e.target.line, e.target.col,
                     )
                 self.ctx.bind(e.target, sym)
@@ -725,6 +816,10 @@ class SemanticAnalyzer:
                 val_t = self._analyze_expr(e.args[2], scope)
                 if val_t != Int:
                     raise SemanticError("array_push value must be int", e.line, e.col)
+                # A push writes at index `len`, so a literal length is the same
+                # thing as a literal index and gets caught here rather than at
+                # run time. Anything computed is checked by BOUNDS_CHECK.
+                self._check_const_length(arr_t, e.args[1], "array_push", 0, e.line, e.col)
                 self.ctx.set_type(e, Int)
                 return Int
             if e.callee == "array_pop":
@@ -736,6 +831,9 @@ class SemanticAnalyzer:
                 len_t = self._analyze_expr(e.args[1], scope)
                 if len_t != Int:
                     raise SemanticError("array_pop length must be int", e.line, e.col)
+                # A pop reads at index `len - 1`, so popping an empty array is
+                # index -1 and is rejected the same way as an overrun.
+                self._check_const_length(arr_t, e.args[1], "array_pop", -1, e.line, e.col)
                 self.ctx.set_type(e, Int)
                 return Int
             if e.callee not in self.ctx.functions:

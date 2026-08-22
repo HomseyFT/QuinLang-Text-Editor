@@ -42,6 +42,27 @@ class OpCode(Enum):
     STR_FROM_INT = auto()  # decimal text
     STR_FROM_CHAR = auto()
 
+    # Floats. A float is 32 bits: two consecutive slots in a frame or a heap
+    # object, but a single operand-stack entry holding the IEEE 754 bit
+    # pattern. Splitting it only at the storage boundary keeps every stack
+    # opcode -- POP, DUP, SWAP, RET's balance check -- one entry per value.
+    PUSH_FLOAT = auto()        # operand: 32-bit bit pattern
+    LOAD_LOCAL_F = auto()      # operand: base slot; reads two words
+    STORE_LOCAL_F = auto()     # operand: base slot; writes two words
+    FADD = auto()
+    FSUB = auto()
+    FMUL = auto()
+    FDIV = auto()
+    FNEG = auto()
+    # Like STR_CMP: reduce the pair to -1/0/1 so the six integer comparison
+    # opcodes can test it against zero, rather than duplicating all six.
+    FCMP = auto()
+    F_FROM_INT = auto()
+    F_TO_INT = auto()          # truncates toward zero, like integer division
+    STR_FROM_FLOAT = auto()
+    PRINT_FLOAT = auto()
+    PRINTLN_FLOAT = auto()
+
     # Logical
     NOT = auto()
     BITNOT = auto()
@@ -87,6 +108,8 @@ class OpCode(Enum):
     # null base into a small non-zero address and read whatever is there.
     HEAP_LOAD_FIELD = auto()   # operand: word offset; pop ref
     HEAP_STORE_FIELD = auto()  # operand: word offset; pop value, pop ref
+    HEAP_LOAD_FIELD_F = auto()   # operand: word offset; pop ref, push the float in two words there
+    HEAP_STORE_FIELD_F = auto()  # operand: word offset; pop float, pop ref
     GC = auto()
     PANIC = auto()             # pop a message id and stop the program
 

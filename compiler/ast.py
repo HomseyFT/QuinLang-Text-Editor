@@ -14,7 +14,7 @@ class Expr(Node):
 
 @dataclass
 class Literal(Expr):
-    value: Union[int, str, bool, None]
+    value: Union[int, float, str, bool, None]
 
 @dataclass
 class Identifier(Expr):
