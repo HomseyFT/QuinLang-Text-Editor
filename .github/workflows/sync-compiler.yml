@@ -26,7 +26,7 @@ jobs:
       - name: Checkout QuinLang
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/QuinLang
+          repository: ${{ github.repository_owner }}/Quin-Lang
           path: lang
 
       - name: Sync compiler and runtime
